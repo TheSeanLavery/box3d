@@ -323,13 +323,20 @@ static bool b3PairQueryCallback( int proxyId, uint64_t userData, void* context )
 	return true;
 }
 
+typedef struct b3FindPairsContext
+{
+	b3World* world;
+	int moveStart;
+} b3FindPairsContext;
+
 static void b3FindPairsTask( int startIndex, int endIndex, int workerIndex, void* context )
 {
 	b3TracyCZoneNC( pair_task, "Pair Task", b3_colorAquamarine, true );
 
 	B3_UNUSED( workerIndex );
 
-	b3World* world = (b3World*)context;
+	b3FindPairsContext* findContext = (b3FindPairsContext*)context;
+	b3World* world = findContext->world;
 	b3BroadPhase* bp = &world->broadPhase;
 
 	b3QueryPairContext queryContext = { 0 };
@@ -342,7 +349,7 @@ static void b3FindPairsTask( int startIndex, int endIndex, int workerIndex, void
 		queryContext.moveResult = bp->moveResults + i;
 		queryContext.moveResult->pairList = NULL;
 
-		int proxyKey = bp->moveArray.data[i];
+		int proxyKey = bp->moveArray.data[findContext->moveStart + i];
 		b3BodyType proxyType = B3_PROXY_TYPE( proxyKey );
 
 		int proxyId = B3_PROXY_ID( proxyKey );
@@ -410,22 +417,64 @@ void b3UpdateBroadPhasePairs( b3World* world )
 
 	b3Stack* alloc = &world->stack;
 
-	// todo these could be in the step context
-	bp->moveResults = (b3MoveResult*)b3StackAlloc( alloc, moveCount * sizeof( b3MoveResult ), "move results" );
-	bp->movePairCapacity = 16 * moveCount;
-	bp->movePairs = (b3MovePair*)b3StackAlloc( alloc, bp->movePairCapacity * sizeof( b3MovePair ), "move pairs" );
-
-	b3AtomicStoreInt( &bp->movePairIndex, 0 );
-
 #ifndef NDEBUG
 	extern b3AtomicInt b3_probeCount;
 	b3AtomicStoreInt( &b3_probeCount, 0 );
 #endif
 
-	int minRange = 64;
-	b3ParallelFor( world, b3FindPairsTask, moveCount, minRange, world, "pairs" );
-
 	b3TracyCZoneNC( create_contacts, "Create Contacts", b3_colorCoral, true );
+
+	const int maxMoveChunk = 64 * 1024;
+	int minRange = 64;
+	for ( int moveStart = 0; moveStart < moveCount; moveStart += maxMoveChunk )
+	{
+		int chunkCount = b3MinInt( maxMoveChunk, moveCount - moveStart );
+
+		// todo these could be in the step context
+		bp->moveResults = (b3MoveResult*)b3StackAlloc( alloc, chunkCount * sizeof( b3MoveResult ), "move results" );
+		bp->movePairCapacity = 16 * chunkCount;
+		bp->movePairs = (b3MovePair*)b3StackAlloc( alloc, bp->movePairCapacity * sizeof( b3MovePair ), "move pairs" );
+
+		b3AtomicStoreInt( &bp->movePairIndex, 0 );
+
+		b3FindPairsContext findContext = { .world = world, .moveStart = moveStart };
+		b3ParallelFor( world, b3FindPairsTask, chunkCount, minRange, &findContext, "pairs" );
+
+		// Single-threaded work: create contacts in deterministic move-buffer order.
+		for ( int i = 0; i < chunkCount; ++i )
+		{
+			b3MoveResult* result = bp->moveResults + i;
+			b3MovePair* pair = result->pairList;
+			while ( pair != NULL )
+			{
+				int shapeIdA = pair->shapeIndexA;
+				int shapeIdB = pair->shapeIndexB;
+				int childIndex = pair->childIndex;
+
+				b3Shape* shapeA = b3Array_Get( world->shapes, shapeIdA );
+				b3Shape* shapeB = b3Array_Get( world->shapes, shapeIdB );
+
+				b3CreateContact( world, shapeA, shapeB, childIndex );
+
+				if ( pair->heap )
+				{
+					b3MovePair* temp = pair;
+					pair = pair->next;
+					b3Free( temp, sizeof( b3MovePair ) );
+				}
+				else
+				{
+					pair = pair->next;
+				}
+			}
+		}
+
+		b3StackFree( alloc, bp->movePairs );
+		bp->movePairs = NULL;
+		b3StackFree( alloc, bp->moveResults );
+		bp->moveResults = NULL;
+		bp->movePairCapacity = 0;
+	}
 
 	// Task that can be done in parallel with the narrow-phase
 	// - rebuild the collision tree for dynamic and kinematic bodies to keep their query performance good
@@ -441,37 +490,6 @@ void b3UpdateBroadPhasePairs( b3World* world )
 		b3UpdateTreesTask( world );
 	}
 
-	// Single-threaded work
-	// - Clear move flags
-	// - Create contacts in deterministic order
-	for ( int i = 0; i < moveCount; ++i )
-	{
-		b3MoveResult* result = bp->moveResults + i;
-		b3MovePair* pair = result->pairList;
-		while ( pair != NULL )
-		{
-			int shapeIdA = pair->shapeIndexA;
-			int shapeIdB = pair->shapeIndexB;
-			int childIndex = pair->childIndex;
-
-			b3Shape* shapeA = b3Array_Get( world->shapes, shapeIdA );
-			b3Shape* shapeB = b3Array_Get( world->shapes, shapeIdB );
-
-			b3CreateContact( world, shapeA, shapeB, childIndex );
-
-			if ( pair->heap )
-			{
-				b3MovePair* temp = pair;
-				pair = pair->next;
-				b3Free( temp, sizeof( b3MovePair ) );
-			}
-			else
-			{
-				pair = pair->next;
-			}
-		}
-	}
-
 	// Reset move buffer: clear only the bits that were set this step.
 	// Invariant: bit set in movedProxies[type] iff proxyKey is present in moveArray.
 	for ( int i = 0; i < bp->moveArray.count; ++i )
@@ -480,11 +498,6 @@ void b3UpdateBroadPhasePairs( b3World* world )
 		b3ClearBit( &bp->movedProxies[B3_PROXY_TYPE( proxyKey )], B3_PROXY_ID( proxyKey ) );
 	}
 	b3Array_Clear( bp->moveArray );
-
-	b3StackFree( alloc, bp->movePairs );
-	bp->movePairs = NULL;
-	b3StackFree( alloc, bp->moveResults );
-	bp->moveResults = NULL;
 
 	b3ValidateSolverSets( world );
 

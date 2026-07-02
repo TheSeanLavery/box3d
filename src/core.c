@@ -154,11 +154,12 @@ void* b3Alloc( size_t size )
 
 	// Allocation must be a multiple of 32 or risk a seg fault
 	// https://en.cppreference.com/w/c/memory/aligned_alloc
-	int size64 = ( ( (int)size - 1 ) | 0x3F ) + 1;
+	size_t size64 = ( ( size - 1 ) | 0x3F ) + 1;
 
 	if ( b3_allocFcn != NULL )
 	{
-		void* ptr = b3_allocFcn( size64, B3_ALIGNMENT );
+		B3_ASSERT( size64 <= INT32_MAX );
+		void* ptr = b3_allocFcn( (int32_t)size64, B3_ALIGNMENT );
 		b3TracyCAlloc( ptr, size );
 
 		B3_ASSERT( ptr != NULL );
@@ -213,7 +214,7 @@ void b3Free( void* mem, size_t size )
 	b3AtomicFetchAddInt( &b3_byteCount, -(int)size );
 }
 
-void* b3GrowAlloc( void* oldMem, int oldSize, int newSize )
+void* b3GrowAlloc( void* oldMem, size_t oldSize, size_t newSize )
 {
 	// todo try _aligned_realloc
 
