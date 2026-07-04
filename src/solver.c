@@ -1190,6 +1190,7 @@ static void b3SolverTask( void* taskContext )
 		b3ExecuteMainStage( stages + stageIndex, context, syncBits );
 		stageIndex += 1;
 		jointSyncIndex += 1;
+		profile->prepareJoints += b3GetMillisecondsAndReset( &ticks );
 
 		// Prepare convex contact constraints
 		uint32_t convexSyncIndex = 1;
@@ -1198,6 +1199,7 @@ static void b3SolverTask( void* taskContext )
 		b3ExecuteMainStage( stages + stageIndex, context, syncBits );
 		stageIndex += 1;
 		convexSyncIndex += 1;
+		profile->prepareWideContacts += b3GetMillisecondsAndReset( &ticks );
 
 		// Prepare mesh contact constraints
 		uint32_t meshSyncIndex = 1;
@@ -1206,12 +1208,15 @@ static void b3SolverTask( void* taskContext )
 		b3ExecuteMainStage( stages + stageIndex, context, syncBits );
 		stageIndex += 1;
 		meshSyncIndex += 1;
+		profile->prepareMeshContacts += b3GetMillisecondsAndReset( &ticks );
 
 		// Single-threaded overflow work. These constraints don't fit in the graph coloring.
 		b3PrepareJoints_Overflow( context );
 		b3PrepareContacts_Overflow( context );
+		profile->prepareOverflow += b3GetMillisecondsAndReset( &ticks );
 
-		profile->prepareConstraints += b3GetMillisecondsAndReset( &ticks );
+		profile->prepareConstraints +=
+			profile->prepareJoints + profile->prepareWideContacts + profile->prepareMeshContacts + profile->prepareOverflow;
 
 		int graphSyncIndex = 1;
 		int subStepCount = context->subStepCount;
@@ -1478,10 +1483,20 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		int colorContactCounts[B3_GRAPH_COLOR_COUNT];
 		// int colorManifoldCounts[B3_GRAPH_COLOR_COUNT];
 		int colorJointCounts[B3_GRAPH_COLOR_COUNT];
+		int* budgetedConvexContacts[B3_GRAPH_COLOR_COUNT] = { 0 };
+		int budgetedConvexContactCounts[B3_GRAPH_COLOR_COUNT] = { 0 };
+		int* contactBudgetCounts = NULL;
 		b3BlockDim graphWideContactDims[B3_GRAPH_COLOR_COUNT];
 		b3BlockDim graphContactDims[B3_GRAPH_COLOR_COUNT];
 		b3BlockDim graphJointDims[B3_GRAPH_COLOR_COUNT];
 		int graphBlockCount = 0;
+
+		int contactBudgetPerBody = world->contactBudgetPerBody;
+		if ( contactBudgetPerBody > 0 && awakeBodyCount > 0 )
+		{
+			contactBudgetCounts = B3_ALLOC( int, awakeBodyCount );
+			memset( contactBudgetCounts, 0, awakeBodyCount * sizeof( int ) );
+		}
 
 		// c is the active color index
 		int wideContactCount = 0;
@@ -1495,6 +1510,44 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 			int colorConvexContactCount = color->convexContacts.count;
 			int colorContactCount = color->contacts.count;
 			int colorJointCount = color->jointSims.count;
+
+			if ( contactBudgetCounts != NULL && colorConvexContactCount > 0 )
+			{
+				int* filteredContacts = B3_ALLOC( int, colorConvexContactCount );
+				int filteredCount = 0;
+				for ( int contactIndex = 0; contactIndex < colorConvexContactCount; ++contactIndex )
+				{
+					int contactId = color->convexContacts.data[contactIndex];
+					b3Contact* contact = b3Array_Get( world->contacts, contactId );
+					int bodyIdA = contact->edges[0].bodyId;
+					int bodyIdB = contact->edges[1].bodyId;
+					b3Body* bodyA = b3Array_Get( world->bodies, bodyIdA );
+					b3Body* bodyB = b3Array_Get( world->bodies, bodyIdB );
+					int localIndexA =
+						bodyA->type == b3_dynamicBody && bodyA->setIndex == b3_awakeSet ? bodyA->localIndex : B3_NULL_INDEX;
+					int localIndexB =
+						bodyB->type == b3_dynamicBody && bodyB->setIndex == b3_awakeSet ? bodyB->localIndex : B3_NULL_INDEX;
+
+					bool keepA = localIndexA == B3_NULL_INDEX || contactBudgetCounts[localIndexA] < contactBudgetPerBody;
+					bool keepB = localIndexB == B3_NULL_INDEX || contactBudgetCounts[localIndexB] < contactBudgetPerBody;
+					if ( keepA && keepB )
+					{
+						filteredContacts[filteredCount++] = contactId;
+						if ( localIndexA != B3_NULL_INDEX )
+						{
+							contactBudgetCounts[localIndexA] += 1;
+						}
+						if ( localIndexB != B3_NULL_INDEX )
+						{
+							contactBudgetCounts[localIndexB] += 1;
+						}
+					}
+				}
+
+				budgetedConvexContacts[i] = filteredContacts;
+				budgetedConvexContactCounts[i] = filteredCount;
+				colorConvexContactCount = filteredCount;
+			}
 
 			if ( colorConvexContactCount + colorContactCount + colorJointCount == 0 )
 			{
@@ -1561,6 +1614,15 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		overflow->manifoldConstraints = (b3ManifoldConstraint*)b3StackAlloc(
 			&world->stack, overflowManifoldCount * sizeof( b3ManifoldConstraint ), "overflow manifolds" );
 
+		world->profile.solverAwakeBodies = (float)awakeBodyCount;
+		world->profile.solverActiveColors = (float)activeColorCount;
+		world->profile.solverWideContacts = (float)wideContactCount;
+		world->profile.solverMeshContacts = (float)contactCount;
+		world->profile.solverManifolds = (float)manifoldCount;
+		world->profile.solverOverflowContacts = (float)overflowCount;
+		world->profile.solverOverflowManifolds = (float)overflowManifoldCount;
+		world->profile.solverGraphBlocks = (float)graphBlockCount;
+
 		// Build the span table for the flat prepare/store parallel-for while I slice the
 		// wide constraint buffer across colors. One entry per active color plus a sentinel
 		// at wideContactCount.
@@ -1579,10 +1641,11 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 				int j = activeColorIndices[i];
 				b3GraphColor* color = colors + j;
 
-				int colorConvexContactCount = color->convexContacts.count;
+				int colorConvexContactCount =
+					budgetedConvexContacts[j] != NULL ? budgetedConvexContactCounts[j] : color->convexContacts.count;
 				widePrepareSpans[i].start = wideBase;
 				widePrepareSpans[i].count = colorConvexContactCount;
-				widePrepareSpans[i].contacts = color->convexContacts.data;
+				widePrepareSpans[i].contacts = budgetedConvexContacts[j] != NULL ? budgetedConvexContacts[j] : color->convexContacts.data;
 
 				if ( colorConvexContactCount == 0 )
 				{
@@ -1881,6 +1944,18 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		b3StackFree( &world->stack, manifoldConstraints );
 		b3StackFree( &world->stack, contactConstraints );
 		b3StackFree( &world->stack, wideConstraints );
+
+		for ( int i = 0; i < B3_GRAPH_COLOR_COUNT; ++i )
+		{
+			if ( budgetedConvexContacts[i] != NULL )
+			{
+				B3_FREE( budgetedConvexContacts[i], int, colors[i].convexContacts.count );
+			}
+		}
+		if ( contactBudgetCounts != NULL )
+		{
+			B3_FREE( contactBudgetCounts, int, awakeBodyCount );
+		}
 
 		world->profile.transforms = b3GetMilliseconds( transformTicks );
 		b3TracyCZoneEnd( update_transforms );

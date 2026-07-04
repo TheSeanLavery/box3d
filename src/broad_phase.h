@@ -40,6 +40,9 @@ typedef struct b3BroadPhase
 	b3MovePair* movePairs;
 	int movePairCapacity;
 	b3AtomicInt movePairIndex;
+	b3AtomicInt duplicatePairCount;
+	b3AtomicInt existingPairCount;
+	b3AtomicInt overflowPairCount;
 
 	// Tracks shape pairs that have a b3Contact
 	// todo pairSet can grow quite large on the first time step and remain large

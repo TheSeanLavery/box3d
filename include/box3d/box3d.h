@@ -190,6 +190,12 @@ B3_API void b3World_SetContactRecycleDistance( b3WorldId worldId, float recycleD
 /// Get the contact point recycling distance. Usually in meters.
 B3_API float b3World_GetContactRecycleDistance( b3WorldId worldId );
 
+/// Set an experimental per-dynamic-body convex contact budget for solver setup. Zero disables budgeting.
+B3_API void b3World_SetContactBudgetPerBody( b3WorldId worldId, int contactBudgetPerBody );
+
+/// Get the experimental per-dynamic-body convex contact budget.
+B3_API int b3World_GetContactBudgetPerBody( b3WorldId worldId );
+
 /// Set the maximum linear speed. Usually in m/s.
 B3_API void b3World_SetMaximumLinearSpeed( b3WorldId worldId, float maximumLinearSpeed );
 
@@ -241,6 +247,9 @@ B3_API void b3World_DumpShapeBounds( b3WorldId worldId, b3BodyType type );
 
 /// This is for internal testing
 B3_API void b3World_RebuildStaticTree( b3WorldId worldId );
+
+/// This is for internal testing
+B3_API int b3World_RebuildDynamicTree( b3WorldId worldId );
 
 /// This is for internal testing
 B3_API void b3World_EnableSpeculative( b3WorldId worldId, bool flag );

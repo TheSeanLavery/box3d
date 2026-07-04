@@ -154,12 +154,13 @@ void b3PrepareContacts_Mesh( b3SolverBlock block, b3StepContext* context )
 			contactConstraint->invMassA = mA;
 			contactConstraint->invIB = iB;
 			contactConstraint->invMassB = mB;
-			contactConstraint->rollingMass = b3InvertMatrix( b3AddMM( iA, iB ) );
 			contactConstraint->softness =
 				( contact->flags & b3_contactStaticFlag ) != 0 ? context->staticSoftness : context->contactSoftness;
 			contactConstraint->friction = contact->friction;
 			contactConstraint->restitution = contact->restitution;
 			contactConstraint->rollingResistance = contact->rollingResistance;
+			contactConstraint->rollingMass =
+				contact->rollingResistance > 0.0f ? b3InvertMatrix( b3AddMM( iA, iB ) ) : b3Mat3_zero;
 
 			b3ManifoldConstraint* manifoldConstraints = manifoldBase + specs[localIndex].manifoldStart;
 			contactConstraint->constraints = manifoldConstraints;
@@ -1864,6 +1865,8 @@ void b3PrepareContacts_Convex( b3SolverBlock block, b3StepContext* context )
 					( (float*)&constraint->twistImpulse )[lane] = warmStartScale * manifold->twistImpulse;
 				}
 
+				float rollingResistance = contact->rollingResistance;
+				if ( rollingResistance > 0.0f )
 				{
 					b3Matrix3 rollingMass = b3InvertMatrix( b3AddMM( iA, iB ) );
 
@@ -1877,6 +1880,19 @@ void b3PrepareContacts_Convex( b3SolverBlock block, b3StepContext* context )
 					( (float*)&constraint->rollingImpulse.X )[lane] = warmStartScale * manifold->rollingImpulse.x;
 					( (float*)&constraint->rollingImpulse.Y )[lane] = warmStartScale * manifold->rollingImpulse.y;
 					( (float*)&constraint->rollingImpulse.Z )[lane] = warmStartScale * manifold->rollingImpulse.z;
+				}
+				else
+				{
+					( (float*)&constraint->rollingMass.cxx )[lane] = 0.0f;
+					( (float*)&constraint->rollingMass.cxy )[lane] = 0.0f;
+					( (float*)&constraint->rollingMass.cxz )[lane] = 0.0f;
+					( (float*)&constraint->rollingMass.cyy )[lane] = 0.0f;
+					( (float*)&constraint->rollingMass.cyz )[lane] = 0.0f;
+					( (float*)&constraint->rollingMass.czz )[lane] = 0.0f;
+
+					( (float*)&constraint->rollingImpulse.X )[lane] = 0.0f;
+					( (float*)&constraint->rollingImpulse.Y )[lane] = 0.0f;
+					( (float*)&constraint->rollingImpulse.Z )[lane] = 0.0f;
 				}
 
 				// zero remaining points
@@ -2009,7 +2025,6 @@ void b3SolveContacts_Convex( b3SolverBlock block, b3StepContext* context, bool u
 		b3FloatW totalNormalImpulse = b3ZeroW();
 		b3FloatW totalTwistLimit = b3ZeroW();
 
-		// todo_erin use the max point count of the four manifolds
 		for ( int pointIndex = 0; pointIndex < B3_MAX_MANIFOLD_POINTS; ++pointIndex )
 		{
 			b3ContactConstraintPointWide* cp = c->points + pointIndex;

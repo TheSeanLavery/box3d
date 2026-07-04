@@ -621,7 +621,7 @@ bool b3ComputeMeshManifolds( b3World* world, int workerIndex, b3Contact* contact
 				b3CollideHullAndTriangle( manifold, pointCapacity, hullB, vertices[0], vertices[1], vertices[2],
 										  triangle.flags, &cache->satCache );
 				context->satCallCount += 1;
-				context->satCacheHitCount += cache->satCache.hit;
+				context->satCacheHitCount += cache->satCache.hit != b3_satCacheMiss;
 				break;
 
 			case b3_sphereShape:

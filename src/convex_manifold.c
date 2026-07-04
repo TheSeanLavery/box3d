@@ -1302,6 +1302,141 @@ static bool b3BuildEdgeContact( b3LocalManifold* manifold, const b3HullData* hul
 	return true;
 }
 
+static bool b3IsCanonicalBoxHull( const b3HullData* hull )
+{
+	if ( hull->vertexCount != 8 || hull->edgeCount != 24 || hull->faceCount != 6 )
+	{
+		return false;
+	}
+
+	b3Vec3 lower = hull->aabb.lowerBound;
+	b3Vec3 upper = hull->aabb.upperBound;
+	const float tolerance = 4.0f * B3_LINEAR_SLOP;
+	return b3AbsFloat( lower.x + upper.x ) <= tolerance && b3AbsFloat( lower.y + upper.y ) <= tolerance &&
+		   b3AbsFloat( lower.z + upper.z ) <= tolerance && b3LengthSquared( hull->center ) <= tolerance * tolerance;
+}
+
+static float b3BoxAxisSeparation( b3Vec3 t, b3Vec3 axis, b3Vec3 hA, b3Vec3 hB, b3Matrix3 rotationBtoA, float* length )
+{
+	float lengthSquared = b3LengthSquared( axis );
+	if ( lengthSquared <= 100.0f * FLT_EPSILON )
+	{
+		*length = 0.0f;
+		return -FLT_MAX;
+	}
+
+	float axisLength = sqrtf( lengthSquared );
+	*length = axisLength;
+
+	float distance = b3AbsFloat( b3Dot( t, axis ) );
+	float radiusA = hA.x * b3AbsFloat( axis.x ) + hA.y * b3AbsFloat( axis.y ) + hA.z * b3AbsFloat( axis.z );
+	float radiusB = hB.x * b3AbsFloat( b3Dot( rotationBtoA.cx, axis ) ) +
+					hB.y * b3AbsFloat( b3Dot( rotationBtoA.cy, axis ) ) +
+					hB.z * b3AbsFloat( b3Dot( rotationBtoA.cz, axis ) );
+	return ( distance - radiusA - radiusB ) / axisLength;
+}
+
+static bool b3TryCollideCanonicalBoxes( b3LocalManifold* manifold, int capacity, const b3HullData* hullA, const b3HullData* hullB,
+										b3Transform transformBtoA, b3SATCache* cache )
+{
+	if ( b3IsCanonicalBoxHull( hullA ) == false || b3IsCanonicalBoxHull( hullB ) == false )
+	{
+		return false;
+	}
+
+	b3Vec3 hA = b3AABB_Extents( hullA->aabb );
+	b3Vec3 hB = b3AABB_Extents( hullB->aabb );
+	b3Vec3 t = transformBtoA.p;
+	b3Matrix3 rotationBtoA = b3MakeMatrixFromQuat( transformBtoA.q );
+	b3Matrix3 absR = b3AbsMatrix3( rotationBtoA );
+	float speculativeDistance = B3_SPECULATIVE_DISTANCE;
+	float maxEdgeSeparation = -FLT_MAX;
+
+	float separationA0 = b3AbsFloat( t.x ) - ( hA.x + hB.x * absR.cx.x + hB.y * absR.cy.x + hB.z * absR.cz.x );
+	float separationA1 = b3AbsFloat( t.y ) - ( hA.y + hB.x * absR.cx.y + hB.y * absR.cy.y + hB.z * absR.cz.y );
+	float separationA2 = b3AbsFloat( t.z ) - ( hA.z + hB.x * absR.cx.z + hB.y * absR.cy.z + hB.z * absR.cz.z );
+	if ( separationA0 > speculativeDistance || separationA1 > speculativeDistance || separationA2 > speculativeDistance )
+	{
+		cache->separation = b3MaxFloat( separationA0, b3MaxFloat( separationA1, separationA2 ) );
+		cache->type = (uint8_t)b3_invalidAxis;
+		cache->hit = b3_satCacheSeparationHit;
+		return true;
+	}
+
+	float separationB0 = b3AbsFloat( b3Dot( t, rotationBtoA.cx ) ) -
+						 ( hB.x + hA.x * absR.cx.x + hA.y * absR.cx.y + hA.z * absR.cx.z );
+	float separationB1 = b3AbsFloat( b3Dot( t, rotationBtoA.cy ) ) -
+						 ( hB.y + hA.x * absR.cy.x + hA.y * absR.cy.y + hA.z * absR.cy.z );
+	float separationB2 = b3AbsFloat( b3Dot( t, rotationBtoA.cz ) ) -
+						 ( hB.z + hA.x * absR.cz.x + hA.y * absR.cz.y + hA.z * absR.cz.z );
+	if ( separationB0 > speculativeDistance || separationB1 > speculativeDistance || separationB2 > speculativeDistance )
+	{
+		cache->separation = b3MaxFloat( separationB0, b3MaxFloat( separationB1, separationB2 ) );
+		cache->type = (uint8_t)b3_invalidAxis;
+		cache->hit = b3_satCacheSeparationHit;
+		return true;
+	}
+
+	const b3Vec3 axesA[3] = { b3Vec3_axisX, b3Vec3_axisY, b3Vec3_axisZ };
+	const b3Vec3 axesB[3] = { rotationBtoA.cx, rotationBtoA.cy, rotationBtoA.cz };
+	for ( int i = 0; i < 3; ++i )
+	{
+		for ( int j = 0; j < 3; ++j )
+		{
+			float axisLength = 0.0f;
+			float edgeSeparation = b3BoxAxisSeparation( t, b3Cross( axesA[i], axesB[j] ), hA, hB, rotationBtoA, &axisLength );
+			if ( axisLength == 0.0f )
+			{
+				continue;
+			}
+
+			if ( edgeSeparation > speculativeDistance )
+			{
+				cache->separation = edgeSeparation;
+				cache->type = (uint8_t)b3_invalidAxis;
+				cache->hit = b3_satCacheSeparationHit;
+				return true;
+			}
+
+			maxEdgeSeparation = b3MaxFloat( maxEdgeSeparation, edgeSeparation );
+		}
+	}
+
+	b3FaceQuery faceQueryA = b3QueryFaceDirections( hullA, hullB, transformBtoA );
+	b3FaceQuery faceQueryB = b3QueryFaceDirections( hullB, hullA, b3InvertTransform( transformBtoA ) );
+
+	float faceSeparationA = faceQueryA.separation;
+	float faceSeparationB = faceQueryB.separation;
+	float bestFaceSeparation = b3MaxFloat( faceSeparationA, faceSeparationB );
+
+	// Edge-dominant box contacts are uncommon in the pile benchmark. Fall back to
+	// the generic hull path so it can build an edge contact with stable features.
+	if ( maxEdgeSeparation > bestFaceSeparation + 0.5f * B3_LINEAR_SLOP )
+	{
+		return false;
+	}
+
+	bool touching;
+	if ( faceSeparationB > faceSeparationA + 0.5f * B3_LINEAR_SLOP )
+	{
+		touching = b3BuildFaceBContact( manifold, capacity, hullA, hullB, transformBtoA, faceQueryB, cache );
+	}
+	else
+	{
+		touching = b3BuildFaceAContact( manifold, capacity, hullA, hullB, transformBtoA, faceQueryA, cache );
+	}
+
+	if ( touching == false || manifold->pointCount == 0 )
+	{
+		manifold->pointCount = 0;
+		*cache = (b3SATCache){ 0 };
+		return false;
+	}
+
+	cache->hit = b3_satCacheFaceHit;
+	return true;
+}
+
 void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* hullA, const b3HullData* hullB, b3Transform transformBtoA,
 					 b3SATCache* cache )
 {
@@ -1316,6 +1451,7 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 	float speculativeDistance = B3_SPECULATIVE_DISTANCE;
 
 	float linearSlop = B3_LINEAR_SLOP;
+	float cacheSeparationTolerance = hullA == hullB ? 4.0f * linearSlop : linearSlop;
 	const b3HullHalfEdge* edgesA = b3GetHullEdges( hullA );
 	const b3Plane* planesA = b3GetHullPlanes( hullA );
 	const b3Vec3* pointsA = b3GetHullPoints( hullA );
@@ -1345,6 +1481,7 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			if ( separation >= speculativeDistance )
 			{
 				// Cache hit, shapes are separated
+				cache->hit = b3_satCacheSeparationHit;
 				return;
 			}
 
@@ -1358,9 +1495,11 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 
 				b3SATCache localCache = { 0 };
 				bool touching = b3BuildFaceAContact( manifold, capacity, hullA, hullB, transformBtoA, faceQuery, &localCache );
-				if ( touching == true && b3AbsFloat( cache->separation - localCache.separation ) < linearSlop )
+				if ( touching == true && b3AbsFloat( cache->separation - localCache.separation ) < cacheSeparationTolerance )
 				{
 					// Cache hit, contact points generated
+					localCache.hit = b3_satCacheFaceHit;
+					*cache = localCache;
 					return;
 				}
 			}
@@ -1381,6 +1520,7 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 			if ( separation >= speculativeDistance )
 			{
 				// Cache hit, shapes are separated
+				cache->hit = b3_satCacheSeparationHit;
 				return;
 			}
 
@@ -1394,9 +1534,11 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 
 				b3SATCache localCache = { 0 };
 				bool touching = b3BuildFaceBContact( manifold, capacity, hullA, hullB, transformBtoA, faceQuery, &localCache );
-				if ( touching == true && b3AbsFloat( cache->separation - localCache.separation ) < linearSlop )
+				if ( touching == true && b3AbsFloat( cache->separation - localCache.separation ) < cacheSeparationTolerance )
 				{
 					// Cache hit, contact points generated
+					localCache.hit = b3_satCacheFaceHit;
+					*cache = localCache;
 					return;
 				}
 			}
@@ -1444,6 +1586,7 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 				if ( separation > speculativeDistance )
 				{
 					// Cache hit, shapes are separated
+					cache->hit = b3_satCacheSeparationHit;
 					return;
 				}
 
@@ -1457,9 +1600,11 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 
 					b3SATCache localCache = { 0 };
 					bool touching = b3BuildEdgeContact( manifold, hullA, hullB, transformBtoA, edgeQuery, &localCache );
-					if ( touching && b3AbsFloat( cache->separation - localCache.separation ) < linearSlop )
+					if ( touching && b3AbsFloat( cache->separation - localCache.separation ) < cacheSeparationTolerance )
 					{
 						// Cache hit, contact point generated
+						localCache.hit = b3_satCacheEdgeHit;
+						*cache = localCache;
 						return;
 					}
 				}
@@ -1501,6 +1646,11 @@ void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* 
 
 	manifold->pointCount = 0;
 	*cache = (b3SATCache){ 0 };
+
+	if ( b3TryCollideCanonicalBoxes( manifold, capacity, hullA, hullB, transformBtoA, cache ) )
+	{
+		return;
+	}
 
 	// Find axis of minimum penetration
 	b3FaceQuery faceQueryA = b3QueryFaceDirections( hullA, hullB, transformBtoA );

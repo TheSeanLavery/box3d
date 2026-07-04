@@ -95,7 +95,7 @@ B3_API float b3GetStallThreshold( void );
 #define B3_AABB_MARGIN_FRACTION 0.125f
 
 /// The time that a body must be still before it will go to sleep. In seconds.
-#define B3_TIME_TO_SLEEP 0.5f
+#define B3_TIME_TO_SLEEP 0.25f
 
 /// Maximum length of the body name. Can be 0 if you don't need names.
 /// Note: this gates recording capability.

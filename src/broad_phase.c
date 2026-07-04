@@ -139,6 +139,8 @@ typedef struct b3MovePair
 typedef struct b3MoveResult
 {
 	b3MovePair* pairList;
+	int nodeVisits;
+	int leafVisits;
 } b3MoveResult;
 
 typedef struct b3QueryPairContext
@@ -225,6 +227,7 @@ static bool b3PairQueryCallback( int proxyId, uint64_t userData, void* context )
 			if ( moved )
 			{
 				// Both proxies are moving. Avoid duplicate pairs.
+				b3AtomicFetchAddInt( &broadPhase->duplicatePairCount, 1 );
 				return true;
 			}
 		}
@@ -236,6 +239,7 @@ static bool b3PairQueryCallback( int proxyId, uint64_t userData, void* context )
 		if ( moved )
 		{
 			// Both proxies are moving. Avoid duplicate pairs.
+			b3AtomicFetchAddInt( &broadPhase->duplicatePairCount, 1 );
 			return true;
 		}
 	}
@@ -244,6 +248,7 @@ static bool b3PairQueryCallback( int proxyId, uint64_t userData, void* context )
 	if ( b3ContainsKey( &broadPhase->pairSet, pairKey ) )
 	{
 		// contact exists
+		b3AtomicFetchAddInt( &broadPhase->existingPairCount, 1 );
 		return true;
 	}
 
@@ -308,6 +313,7 @@ static bool b3PairQueryCallback( int proxyId, uint64_t userData, void* context )
 	else
 	{
 		// todo experimenting with ignoring this pair if we ran out of space
+		b3AtomicFetchAddInt( &broadPhase->overflowPairCount, 1 );
 		return true;
 		// pair = (b3MovePair*)b3Alloc( sizeof( b3MovePair ) );
 		// pair->heap = true;
@@ -345,9 +351,11 @@ static void b3FindPairsTask( int startIndex, int endIndex, int workerIndex, void
 
 	for ( int i = startIndex; i < endIndex; ++i )
 	{
-		// Initialize move result for this moved proxy
-		queryContext.moveResult = bp->moveResults + i;
-		queryContext.moveResult->pairList = NULL;
+			// Initialize move result for this moved proxy
+			queryContext.moveResult = bp->moveResults + i;
+			queryContext.moveResult->pairList = NULL;
+			queryContext.moveResult->nodeVisits = 0;
+			queryContext.moveResult->leafVisits = 0;
 
 		int proxyKey = bp->moveArray.data[findContext->moveStart + i];
 		b3BodyType proxyType = B3_PROXY_TYPE( proxyKey );
@@ -369,24 +377,30 @@ static void b3FindPairsTask( int startIndex, int endIndex, int workerIndex, void
 		// Query trees. Only dynamic proxies collide with kinematic and static proxies.
 		// Using B3_DEFAULT_MASK_BITS so that b3Filter::groupIndex works.
 		// consider using bits = groupIndex > 0 ? B3_DEFAULT_MASK_BITS : maskBits
-		bool requireAllBits = false;
-		if ( proxyType == b3_dynamicBody )
-		{
-			queryContext.queryTreeType = b3_kinematicBody;
-			b3DynamicTree_Query( bp->trees + b3_kinematicBody, fatAABB, B3_DEFAULT_MASK_BITS, requireAllBits, b3PairQueryCallback,
-								 &queryContext );
+			bool requireAllBits = false;
+			if ( proxyType == b3_dynamicBody )
+			{
+				queryContext.queryTreeType = b3_kinematicBody;
+				b3TreeStats stats = b3DynamicTree_Query( bp->trees + b3_kinematicBody, fatAABB, B3_DEFAULT_MASK_BITS,
+														  requireAllBits, b3PairQueryCallback, &queryContext );
+				queryContext.moveResult->nodeVisits += stats.nodeVisits;
+				queryContext.moveResult->leafVisits += stats.leafVisits;
 
-			queryContext.queryTreeType = b3_staticBody;
-			b3DynamicTree_Query( bp->trees + b3_staticBody, fatAABB, B3_DEFAULT_MASK_BITS, requireAllBits, b3PairQueryCallback,
-								 &queryContext );
+				queryContext.queryTreeType = b3_staticBody;
+				stats = b3DynamicTree_Query( bp->trees + b3_staticBody, fatAABB, B3_DEFAULT_MASK_BITS, requireAllBits,
+											 b3PairQueryCallback, &queryContext );
+				queryContext.moveResult->nodeVisits += stats.nodeVisits;
+				queryContext.moveResult->leafVisits += stats.leafVisits;
+			}
+
+			// All proxies collide with dynamic proxies
+			// Using B3_DEFAULT_MASK_BITS so that b3Filter::groupIndex works.
+			queryContext.queryTreeType = b3_dynamicBody;
+			b3TreeStats stats = b3DynamicTree_Query( bp->trees + b3_dynamicBody, fatAABB, B3_DEFAULT_MASK_BITS, requireAllBits,
+													 b3PairQueryCallback, &queryContext );
+			queryContext.moveResult->nodeVisits += stats.nodeVisits;
+			queryContext.moveResult->leafVisits += stats.leafVisits;
 		}
-
-		// All proxies collide with dynamic proxies
-		// Using B3_DEFAULT_MASK_BITS so that b3Filter::groupIndex works.
-		queryContext.queryTreeType = b3_dynamicBody;
-		b3DynamicTree_Query( bp->trees + b3_dynamicBody, fatAABB, B3_DEFAULT_MASK_BITS, requireAllBits, b3PairQueryCallback,
-							 &queryContext );
-	}
 
 	b3TracyCZoneEnd( pair_task );
 }
@@ -407,11 +421,23 @@ void b3UpdateBroadPhasePairs( b3World* world )
 	b3BroadPhase* bp = &world->broadPhase;
 
 	int moveCount = bp->moveArray.count;
+	world->profile.broadphasePairSetCount = (float)bp->pairSet.count;
+	world->profile.dynamicTreeHeight = (float)b3DynamicTree_GetHeight( bp->trees + b3_dynamicBody );
+	world->profile.dynamicTreeAreaRatio = b3DynamicTree_GetAreaRatio( bp->trees + b3_dynamicBody );
 
 	if ( moveCount == 0 )
 	{
 		return;
 	}
+
+	world->profile.broadphaseMoves = (float)moveCount;
+	world->profile.broadphaseTreeNodeVisits = 0.0f;
+	world->profile.broadphaseTreeLeafVisits = 0.0f;
+	world->profile.broadphaseDuplicatePairs = 0.0f;
+	world->profile.broadphaseExistingPairs = 0.0f;
+	world->profile.broadphaseCandidatePairs = 0.0f;
+	world->profile.broadphaseOverflowPairs = 0.0f;
+	world->profile.broadphaseCreatedContacts = 0.0f;
 
 	b3TracyCZoneNC( update_pairs, "Pairs", b3_colorMediumSlateBlue, true );
 
@@ -432,29 +458,42 @@ void b3UpdateBroadPhasePairs( b3World* world )
 
 		// todo these could be in the step context
 		bp->moveResults = (b3MoveResult*)b3StackAlloc( alloc, chunkCount * sizeof( b3MoveResult ), "move results" );
-		bp->movePairCapacity = 16 * chunkCount;
-		bp->movePairs = (b3MovePair*)b3StackAlloc( alloc, bp->movePairCapacity * sizeof( b3MovePair ), "move pairs" );
+			bp->movePairCapacity = 16 * chunkCount;
+			bp->movePairs = (b3MovePair*)b3StackAlloc( alloc, bp->movePairCapacity * sizeof( b3MovePair ), "move pairs" );
 
-		b3AtomicStoreInt( &bp->movePairIndex, 0 );
+			b3AtomicStoreInt( &bp->movePairIndex, 0 );
+			b3AtomicStoreInt( &bp->duplicatePairCount, 0 );
+			b3AtomicStoreInt( &bp->existingPairCount, 0 );
+			b3AtomicStoreInt( &bp->overflowPairCount, 0 );
 
-		b3FindPairsContext findContext = { .world = world, .moveStart = moveStart };
-		b3ParallelFor( world, b3FindPairsTask, chunkCount, minRange, &findContext, "pairs" );
+			b3FindPairsContext findContext = { .world = world, .moveStart = moveStart };
+			b3ParallelFor( world, b3FindPairsTask, chunkCount, minRange, &findContext, "pairs" );
+			for ( int i = 0; i < chunkCount; ++i )
+			{
+				world->profile.broadphaseTreeNodeVisits += (float)bp->moveResults[i].nodeVisits;
+				world->profile.broadphaseTreeLeafVisits += (float)bp->moveResults[i].leafVisits;
+			}
+			world->profile.broadphaseDuplicatePairs += (float)b3AtomicLoadInt( &bp->duplicatePairCount );
+			world->profile.broadphaseExistingPairs += (float)b3AtomicLoadInt( &bp->existingPairCount );
+			world->profile.broadphaseCandidatePairs += (float)b3AtomicLoadInt( &bp->movePairIndex );
+			world->profile.broadphaseOverflowPairs += (float)b3AtomicLoadInt( &bp->overflowPairCount );
 
-		// Single-threaded work: create contacts in deterministic move-buffer order.
-		for ( int i = 0; i < chunkCount; ++i )
+			// Single-threaded work: create contacts in deterministic move-buffer order.
+			for ( int i = 0; i < chunkCount; ++i )
 		{
 			b3MoveResult* result = bp->moveResults + i;
 			b3MovePair* pair = result->pairList;
-			while ( pair != NULL )
-			{
-				int shapeIdA = pair->shapeIndexA;
-				int shapeIdB = pair->shapeIndexB;
-				int childIndex = pair->childIndex;
+				while ( pair != NULL )
+				{
+					int shapeIdA = pair->shapeIndexA;
+					int shapeIdB = pair->shapeIndexB;
+					int childIndex = pair->childIndex;
 
-				b3Shape* shapeA = b3Array_Get( world->shapes, shapeIdA );
-				b3Shape* shapeB = b3Array_Get( world->shapes, shapeIdB );
+					b3Shape* shapeA = b3Array_Get( world->shapes, shapeIdA );
+					b3Shape* shapeB = b3Array_Get( world->shapes, shapeIdB );
 
-				b3CreateContact( world, shapeA, shapeB, childIndex );
+					b3CreateContact( world, shapeA, shapeB, childIndex );
+					world->profile.broadphaseCreatedContacts += 1.0f;
 
 				if ( pair->heap )
 				{

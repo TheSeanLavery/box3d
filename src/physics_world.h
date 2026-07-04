@@ -101,12 +101,25 @@ typedef struct b3TaskContext
 	// Profiling
 	int satCallCount;
 	int satCacheHitCount;
+	int satSameHullCallCount;
+	int satBoxHullCallCount;
+	int satCacheSeparationHitCount;
+	int satCacheFaceHitCount;
+	int satCacheEdgeHitCount;
+	int satFullSearchCount;
 	int distanceIterations;
 	int pushBackIterations;
 	int rootIterations;
 
 	// Number of contacts recycled this step (collide pass).
 	int recycledContactCount;
+	int recycleCandidateCount;
+	int recycleMissingCacheCount;
+	int recycleFastMeshCount;
+	int recycleTestedCount;
+	int recycleRejectedAngularCount;
+	int recycleRejectedLinearCount;
+	int recycleRejectedArcCount;
 
 	b3DebugPoint points[B3_DEBUG_POINT_CAPACITY];
 	int pointCount;
@@ -229,6 +242,7 @@ typedef struct b3World
 	float contactHertz;
 	float contactDampingRatio;
 	float contactRecycleDistance;
+	int contactBudgetPerBody;
 
 	b3FrictionCallback* frictionCallback;
 	b3RestitutionCallback* restitutionCallback;
@@ -238,6 +252,12 @@ typedef struct b3World
 	b3Profile profile;
 	int satCallCount;
 	int satCacheHitCount;
+	int satSameHullCallCount;
+	int satBoxHullCallCount;
+	int satCacheSeparationHitCount;
+	int satCacheFaceHitCount;
+	int satCacheEdgeHitCount;
+	int satFullSearchCount;
 	int manifoldCounts[B3_CONTACT_MANIFOLD_COUNT_BUCKETS];
 
 	b3Capacity maxCapacity;
@@ -344,4 +364,3 @@ static inline void b3FreeManifolds( b3World* world, b3Manifold* manifolds, int c
 	b3FreeElement( allocator, manifolds );
 	b3UnlockMutex( world->manifoldAllocatorMutex );
 }
-

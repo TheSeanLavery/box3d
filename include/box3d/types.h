@@ -523,11 +523,61 @@ typedef struct b3Profile
 {
 	float step;
 	float pairs;
+	float broadphaseMoves;
+	float broadphaseTreeNodeVisits;
+	float broadphaseTreeLeafVisits;
+	float broadphaseDuplicatePairs;
+	float broadphaseExistingPairs;
+	float broadphaseCandidatePairs;
+	float broadphaseOverflowPairs;
+	float broadphaseCreatedContacts;
+	float broadphasePairSetCount;
+	float dynamicTreeHeight;
+	float dynamicTreeAreaRatio;
 	float collide;
+	float collideGather;
+	float collideTask;
+	float collideContactState;
+	float collideTouchingContacts;
+	float collideNonTouchingContacts;
+	float collideTotalContacts;
+	float collideRecycledContacts;
+	float collideUpdatedContacts;
+	float collideDisjointContacts;
+	float collideStartedTouching;
+	float collideStoppedTouching;
+	float collideManifoldContacts;
+	float collideSatCalls;
+	float collideSatCacheHits;
+	float collideSatSameHullCalls;
+	float collideSatBoxHullCalls;
+	float collideSatCacheSeparationHits;
+	float collideSatCacheFaceHits;
+	float collideSatCacheEdgeHits;
+	float collideSatFullSearches;
+	float collideRecycleCandidates;
+	float collideRecycleMissingCache;
+	float collideRecycleFastMesh;
+	float collideRecycleTested;
+	float collideRecycleRejectedAngular;
+	float collideRecycleRejectedLinear;
+	float collideRecycleRejectedArc;
 	float solve;
 	float solverSetup;
+	float solverAwakeBodies;
+	float solverActiveColors;
+	float solverWideContacts;
+	float solverMeshContacts;
+	float solverManifolds;
+	float solverOverflowContacts;
+	float solverOverflowManifolds;
+	float solverGraphBlocks;
 	float constraints;
 	float prepareConstraints;
+	float prepareJoints;
+	float prepareWideContacts;
+	float prepareMeshContacts;
+	float prepareOverflow;
 	float integrateVelocities;
 	float warmStart;
 	float solveImpulses;
@@ -2649,6 +2699,14 @@ typedef enum
 } b3TriangleFeature;
 
 /// Separating axis test cache. Provides temporal acceleration of collision routines.
+typedef enum
+{
+	b3_satCacheMiss = 0,
+	b3_satCacheSeparationHit = 1,
+	b3_satCacheFaceHit = 2,
+	b3_satCacheEdgeHit = 3,
+} b3SATCacheHitType;
+
 typedef struct
 {
 	/// The separation when the cache is populated. Negative for overlap.
@@ -2663,7 +2721,7 @@ typedef struct
 	/// Index of the feature on shape B.
 	uint8_t indexB;
 
-	/// Was the cache re-used?
+	/// b3SATCacheHitType.
 	uint8_t hit;
 } b3SATCache;
 

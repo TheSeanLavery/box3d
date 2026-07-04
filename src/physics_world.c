@@ -644,84 +644,115 @@ static void b3CollideTask( int startIndex, int endIndex, int workerIndex, void* 
 		contact->bodySimIndexA = isStaticA ? B3_NULL_INDEX : bodyA->localIndex;
 		contact->bodySimIndexB = isStaticB ? B3_NULL_INDEX : bodyB->localIndex;
 		float recycleTolerance = wasTouching ? recycleDistance : recycleDistanceNonTouching;
+		if ( wasTouching == false && isMeshContact == false && shapeA->type == b3_hullShape && shapeB->type == b3_hullShape )
+		{
+			const b3SATCache* satCache = &contact->convexContact.cache.satCache;
+			if ( satCache->separation > recycleDistance + speculativeDistance )
+			{
+				recycleTolerance = recycleDistance;
+			}
+		}
 
 		// Contact recycling optimization. Please cite this library if you use this optimization.
 		// This is inspired by persistent contact manifolds used in some physics engines, such as PhysX.
 		// However, this allows larger relative motion and has fewer tuning parameters (just one).
-		if ( ( isFast == false || isMeshContact == false ) && recycleDistance > 0.0f &&
-			 ( contact->flags & b3_relativeTransformValid ) && ( contact->flags & b3_contactRecycleFlag ) )
+		if ( recycleDistance > 0.0f && ( contact->flags & b3_contactRecycleFlag ) )
 		{
-			float angleA = b3DotQuat( transformA.q, contact->cachedRotationA );
-			float angleB = b3DotQuat( transformB.q, contact->cachedRotationB );
-			float angularDistance = b3MinFloat( angleA * angleA, angleB * angleB );
-
-			b3Transform xf = b3InvMulWorldTransforms( transformA, transformB );
-			b3Transform xfc = contact->cachedRelativePose;
-			b3Vec3 maxExtentA = isStaticA ? b3Vec3_zero : bodySimA->maxExtent;
-			b3Vec3 maxExtentB = isStaticB ? b3Vec3_zero : bodySimB->maxExtent;
-			b3Vec3 maxExtent = b3Max( maxExtentA, maxExtentB );
-
-			// Variation of Conservative Advancement
-			// distance + 2 * length(modified_cross(|qr.v|, maxExtent)) < recycleTolerance.
-			// 2*|qr.v| == 2*|sin(theta/2)| ~= theta for small angles.
-			float distSquared = b3DistanceSquared( xf.p, xfc.p );
-
-			if ( angularDistance > B3_CONTACT_RECYCLE_ANGULAR_DISTANCE && distSquared < recycleTolerance * recycleTolerance )
+			taskContext->recycleCandidateCount += 1;
+			if ( isFast && isMeshContact )
 			{
-				float distance = sqrtf( distSquared );
-				float slack = recycleTolerance - distance;
+				taskContext->recycleFastMeshCount += 1;
+			}
+			else if ( ( contact->flags & b3_relativeTransformValid ) == 0 )
+			{
+				taskContext->recycleMissingCacheCount += 1;
+			}
+			else
+			{
+				taskContext->recycleTestedCount += 1;
+				float angleA = b3DotQuat( transformA.q, contact->cachedRotationA );
+				float angleB = b3DotQuat( transformB.q, contact->cachedRotationB );
+				float angularDistance = b3MinFloat( angleA * angleA, angleB * angleB );
 
-				// qr = inv( inv(qA0) * qB0 ) * inv(qA) * qB
-				//    = inv(qB0) * qA0 * inv(qA) * qB
-				// Suppose A is static
-				// qr = inv(qB0) * qA0 * inv(qA0) * qB
-				//    = inv(qB0) * qB
-				// qB = qB0 * qr
-				// Therefore qr is associated with the local angular velocity of body B when A is static.
-				b3Quat qr = b3InvMulQuat( xfc.q, xf.q );
-				b3Vec3 arc = b3ModifiedCross( b3Abs( qr.v ), maxExtent );
+				b3Transform xf = b3InvMulWorldTransforms( transformA, transformB );
+				b3Transform xfc = contact->cachedRelativePose;
+				b3Vec3 maxExtentA = isStaticA ? b3Vec3_zero : bodySimA->maxExtent;
+				b3Vec3 maxExtentB = isStaticB ? b3Vec3_zero : bodySimB->maxExtent;
+				b3Vec3 maxExtent = b3Max( maxExtentA, maxExtentB );
 
-				float arcSq = 4.0f * b3LengthSquared( arc );
-				if ( arcSq < slack * slack )
+				// Variation of Conservative Advancement
+				// distance + 2 * length(modified_cross(|qr.v|, maxExtent)) < recycleTolerance.
+				// 2*|qr.v| == 2*|sin(theta/2)| ~= theta for small angles.
+				float distSquared = b3DistanceSquared( xf.p, xfc.p );
+				if ( angularDistance <= B3_CONTACT_RECYCLE_ANGULAR_DISTANCE )
 				{
-					b3Quat dqA = b3MulQuat( transformA.q, b3Conjugate( contact->cachedRotationA ) );
-					b3Quat dqB = b3MulQuat( transformB.q, b3Conjugate( contact->cachedRotationB ) );
-					b3Matrix3 matrixA = b3MakeMatrixFromQuat( dqA );
-					b3Matrix3 matrixB = b3MakeMatrixFromQuat( dqB );
+					taskContext->recycleRejectedAngularCount += 1;
+				}
+				else if ( distSquared >= recycleTolerance * recycleTolerance )
+				{
+					taskContext->recycleRejectedLinearCount += 1;
+				}
+				else
+				{
+					float distance = sqrtf( distSquared );
+					float slack = recycleTolerance - distance;
 
-					// Minimize round-off
-					b3Vec3 dc = b3SubPos( bodySimB->center, bodySimA->center );
+					// qr = inv( inv(qA0) * qB0 ) * inv(qA) * qB
+					//    = inv(qB0) * qA0 * inv(qA) * qB
+					// Suppose A is static
+					// qr = inv(qB0) * qA0 * inv(qA0) * qB
+					//    = inv(qB0) * qB
+					// qB = qB0 * qr
+					// Therefore qr is associated with the local angular velocity of body B when A is static.
+					b3Quat qr = b3InvMulQuat( xfc.q, xf.q );
+					b3Vec3 arc = b3ModifiedCross( b3Abs( qr.v ), maxExtent );
 
-					int manifoldCount = contact->manifoldCount;
-					for ( int manifoldIndex = 0; manifoldIndex < manifoldCount; ++manifoldIndex )
+					float arcSq = 4.0f * b3LengthSquared( arc );
+					if ( arcSq >= slack * slack )
 					{
-						b3Manifold* manifold = contact->manifolds + manifoldIndex;
-						b3Vec3 normal = manifold->normal;
+						taskContext->recycleRejectedArcCount += 1;
+					}
+					else
+					{
+						b3Quat dqA = b3MulQuat( transformA.q, b3Conjugate( contact->cachedRotationA ) );
+						b3Quat dqB = b3MulQuat( transformB.q, b3Conjugate( contact->cachedRotationB ) );
+						b3Matrix3 matrixA = b3MakeMatrixFromQuat( dqA );
+						b3Matrix3 matrixB = b3MakeMatrixFromQuat( dqB );
 
-						int pointCount = manifold->pointCount;
-						for ( int pointIndex = 0; pointIndex < pointCount; ++pointIndex )
+						// Minimize round-off
+						b3Vec3 dc = b3SubPos( bodySimB->center, bodySimA->center );
+
+						int manifoldCount = contact->manifoldCount;
+						for ( int manifoldIndex = 0; manifoldIndex < manifoldCount; ++manifoldIndex )
 						{
-							// Keep anchors but update separation, same as sub-stepping. This eliminates jitter.
-							b3ManifoldPoint* mp = manifold->points + pointIndex;
-							b3Vec3 rA = b3MulMV( matrixA, mp->anchorA );
-							b3Vec3 rB = b3MulMV( matrixB, mp->anchorB );
-							b3Vec3 dp = b3Add( dc, b3Sub( rB, rA ) );
-							mp->separation = mp->baseSeparation + b3Dot( dp, normal );
-							mp->persisted = true;
+							b3Manifold* manifold = contact->manifolds + manifoldIndex;
+							b3Vec3 normal = manifold->normal;
+
+							int pointCount = manifold->pointCount;
+							for ( int pointIndex = 0; pointIndex < pointCount; ++pointIndex )
+							{
+								// Keep anchors but update separation, same as sub-stepping. This eliminates jitter.
+								b3ManifoldPoint* mp = manifold->points + pointIndex;
+								b3Vec3 rA = b3MulMV( matrixA, mp->anchorA );
+								b3Vec3 rB = b3MulMV( matrixB, mp->anchorB );
+								b3Vec3 dp = b3Add( dc, b3Sub( rB, rA ) );
+								mp->separation = mp->baseSeparation + b3Dot( dp, normal );
+								mp->persisted = true;
+							}
 						}
-					}
 
-					// Diagnostics
-					taskContext->recycledContactCount += 1;
-					int bucketIndex = b3MinInt( manifoldCount, B3_CONTACT_MANIFOLD_COUNT_BUCKETS - 1 );
-					if ( bucketIndex > 0 )
-					{
-						taskContext->manifoldCounts[bucketIndex - 1] += 1;
-					}
+						// Diagnostics
+						taskContext->recycledContactCount += 1;
+						int bucketIndex = b3MinInt( manifoldCount, B3_CONTACT_MANIFOLD_COUNT_BUCKETS - 1 );
+						if ( bucketIndex > 0 )
+						{
+							taskContext->manifoldCounts[bucketIndex - 1] += 1;
+						}
 
-					// Contact is recycled. This also skips updating other aspects of the contact
-					// such as material parameters.
-					continue;
+						// Contact is recycled. This also skips updating other aspects of the contact
+						// such as material parameters.
+						continue;
+					}
 				}
 			}
 		}
@@ -813,6 +844,7 @@ static void b3Collide( b3StepContext* context )
 	B3_ASSERT( world->workerCount > 0 );
 
 	b3TracyCZoneNC( collide, "Collide", b3_colorDarkOrchid, true );
+	uint64_t gatherTicks = b3GetTicks();
 
 	// Gather contacts from all the graph colors into a single array for easier parallel-for
 	int touchingCount = 0;
@@ -827,9 +859,13 @@ static void b3Collide( b3StepContext* context )
 	int nonTouchingCount = awakeSet->contactIndices.count;
 
 	int contactCount = touchingCount + nonTouchingCount;
+	world->profile.collideTouchingContacts = (float)touchingCount;
+	world->profile.collideNonTouchingContacts = (float)nonTouchingCount;
+	world->profile.collideTotalContacts = (float)contactCount;
 
 	if ( contactCount == 0 )
 	{
+		world->profile.collideGather = b3GetMilliseconds( gatherTicks );
 		b3TracyCZoneEnd( collide );
 		return;
 	}
@@ -864,6 +900,7 @@ static void b3Collide( b3StepContext* context )
 	}
 
 	context->awakeContactIndices = contactIndices;
+	world->profile.collideGather = b3GetMilliseconds( gatherTicks );
 
 	// Contact bit set on ids because contact pointers are unstable as they move between touching and not touching.
 	int contactIdCapacity = b3GetIdCapacity( &world->contactIdPool );
@@ -873,13 +910,28 @@ static void b3Collide( b3StepContext* context )
 		b3SetBitCountAndClear( &taskContext->contactStateBitSet, contactIdCapacity );
 		taskContext->satCallCount = 0;
 		taskContext->satCacheHitCount = 0;
+		taskContext->satSameHullCallCount = 0;
+		taskContext->satBoxHullCallCount = 0;
+		taskContext->satCacheSeparationHitCount = 0;
+		taskContext->satCacheFaceHitCount = 0;
+		taskContext->satCacheEdgeHitCount = 0;
+		taskContext->satFullSearchCount = 0;
 		taskContext->recycledContactCount = 0;
+		taskContext->recycleCandidateCount = 0;
+		taskContext->recycleMissingCacheCount = 0;
+		taskContext->recycleFastMeshCount = 0;
+		taskContext->recycleTestedCount = 0;
+		taskContext->recycleRejectedAngularCount = 0;
+		taskContext->recycleRejectedLinearCount = 0;
+		taskContext->recycleRejectedArcCount = 0;
 		memset( taskContext->manifoldCounts, 0, sizeof( taskContext->manifoldCounts ) );
 	}
 
 	// Task should take at least 40us on a 4GHz CPU (10K cycles)
 	int minRange = 20;
+	uint64_t collideTaskTicks = b3GetTicks();
 	b3ParallelFor( world, b3CollideTask, contactCount, minRange, context, "collide" );
+	world->profile.collideTask = b3GetMilliseconds( collideTaskTicks );
 
 	b3StackFree( &world->stack, contactIndices );
 	context->awakeContactIndices = NULL;
@@ -888,6 +940,7 @@ static void b3Collide( b3StepContext* context )
 	// Serially update contact state
 	// todo bring this zone together with island merge
 	b3TracyCZoneNC( contact_state, "Contact State", b3_colorLightSlateGray, true );
+	uint64_t contactStateTicks = b3GetTicks();
 
 	int satMultiplier = context->dt > 0.0f ? 1 : 0;
 
@@ -895,6 +948,20 @@ static void b3Collide( b3StepContext* context )
 	b3BitSet* bitSet = &world->taskContexts.data[0].contactStateBitSet;
 	world->satCallCount = satMultiplier * world->taskContexts.data[0].satCallCount;
 	world->satCacheHitCount = satMultiplier * world->taskContexts.data[0].satCacheHitCount;
+	world->satSameHullCallCount = satMultiplier * world->taskContexts.data[0].satSameHullCallCount;
+	world->satBoxHullCallCount = satMultiplier * world->taskContexts.data[0].satBoxHullCallCount;
+	world->satCacheSeparationHitCount = satMultiplier * world->taskContexts.data[0].satCacheSeparationHitCount;
+	world->satCacheFaceHitCount = satMultiplier * world->taskContexts.data[0].satCacheFaceHitCount;
+	world->satCacheEdgeHitCount = satMultiplier * world->taskContexts.data[0].satCacheEdgeHitCount;
+	world->satFullSearchCount = satMultiplier * world->taskContexts.data[0].satFullSearchCount;
+	int recycledContactCount = world->taskContexts.data[0].recycledContactCount;
+	int recycleCandidateCount = world->taskContexts.data[0].recycleCandidateCount;
+	int recycleMissingCacheCount = world->taskContexts.data[0].recycleMissingCacheCount;
+	int recycleFastMeshCount = world->taskContexts.data[0].recycleFastMeshCount;
+	int recycleTestedCount = world->taskContexts.data[0].recycleTestedCount;
+	int recycleRejectedAngularCount = world->taskContexts.data[0].recycleRejectedAngularCount;
+	int recycleRejectedLinearCount = world->taskContexts.data[0].recycleRejectedLinearCount;
+	int recycleRejectedArcCount = world->taskContexts.data[0].recycleRejectedArcCount;
 	memcpy( world->manifoldCounts, world->taskContexts.data[0].manifoldCounts,
 			B3_CONTACT_MANIFOLD_COUNT_BUCKETS * sizeof( int ) );
 
@@ -903,6 +970,20 @@ static void b3Collide( b3StepContext* context )
 		b3InPlaceUnion( bitSet, &world->taskContexts.data[i].contactStateBitSet );
 		world->satCallCount += world->taskContexts.data[i].satCallCount;
 		world->satCacheHitCount += world->taskContexts.data[i].satCacheHitCount;
+		world->satSameHullCallCount += world->taskContexts.data[i].satSameHullCallCount;
+		world->satBoxHullCallCount += world->taskContexts.data[i].satBoxHullCallCount;
+		world->satCacheSeparationHitCount += world->taskContexts.data[i].satCacheSeparationHitCount;
+		world->satCacheFaceHitCount += world->taskContexts.data[i].satCacheFaceHitCount;
+		world->satCacheEdgeHitCount += world->taskContexts.data[i].satCacheEdgeHitCount;
+		world->satFullSearchCount += world->taskContexts.data[i].satFullSearchCount;
+		recycledContactCount += world->taskContexts.data[i].recycledContactCount;
+		recycleCandidateCount += world->taskContexts.data[i].recycleCandidateCount;
+		recycleMissingCacheCount += world->taskContexts.data[i].recycleMissingCacheCount;
+		recycleFastMeshCount += world->taskContexts.data[i].recycleFastMeshCount;
+		recycleTestedCount += world->taskContexts.data[i].recycleTestedCount;
+		recycleRejectedAngularCount += world->taskContexts.data[i].recycleRejectedAngularCount;
+		recycleRejectedLinearCount += world->taskContexts.data[i].recycleRejectedLinearCount;
+		recycleRejectedArcCount += world->taskContexts.data[i].recycleRejectedArcCount;
 		for ( int j = 0; j < B3_CONTACT_MANIFOLD_COUNT_BUCKETS; ++j )
 		{
 			world->manifoldCounts[j] += world->taskContexts.data[i].manifoldCounts[j];
@@ -921,6 +1002,9 @@ static void b3Collide( b3StepContext* context )
 
 	const b3Shape* shapes = world->shapes.data;
 	uint16_t worldId = world->worldId;
+	int disjointCount = 0;
+	int startedTouchingCount = 0;
+	int stoppedTouchingCount = 0;
 
 	// Process contact state changes. Iterate over set bits
 	for ( uint32_t k = 0; k < bitSet->blockCount; ++k )
@@ -948,12 +1032,14 @@ static void b3Collide( b3StepContext* context )
 
 			if ( flags & b3_simDisjoint )
 			{
+				disjointCount += 1;
 				// Bounding boxes no longer overlap
 				b3DestroyContact( world, contact, false );
 				contact = NULL;
 			}
 			else if ( flags & b3_simStartedTouching )
 			{
+				startedTouchingCount += 1;
 				B3_ASSERT( contact->islandId == B3_NULL_INDEX );
 
 				if ( flags & b3_contactEnableContactEvents )
@@ -984,6 +1070,7 @@ static void b3Collide( b3StepContext* context )
 			}
 			else if ( flags & b3_simStoppedTouching )
 			{
+				stoppedTouchingCount += 1;
 				contact->flags &= ~b3_simStoppedTouching;
 				contact->flags &= ~b3_contactTouchingFlag;
 
@@ -1014,6 +1101,35 @@ static void b3Collide( b3StepContext* context )
 			bits = bits & ( bits - 1 );
 		}
 	}
+
+	int manifoldContactCount = 0;
+	for ( int i = 0; i < B3_CONTACT_MANIFOLD_COUNT_BUCKETS; ++i )
+	{
+		manifoldContactCount += world->manifoldCounts[i];
+	}
+
+	world->profile.collideContactState = b3GetMilliseconds( contactStateTicks );
+	world->profile.collideRecycledContacts = (float)recycledContactCount;
+	world->profile.collideUpdatedContacts = (float)b3MaxInt( 0, contactCount - recycledContactCount - disjointCount );
+	world->profile.collideDisjointContacts = (float)disjointCount;
+	world->profile.collideStartedTouching = (float)startedTouchingCount;
+	world->profile.collideStoppedTouching = (float)stoppedTouchingCount;
+	world->profile.collideManifoldContacts = (float)manifoldContactCount;
+	world->profile.collideSatCalls = (float)world->satCallCount;
+	world->profile.collideSatCacheHits = (float)world->satCacheHitCount;
+	world->profile.collideSatSameHullCalls = (float)world->satSameHullCallCount;
+	world->profile.collideSatBoxHullCalls = (float)world->satBoxHullCallCount;
+	world->profile.collideSatCacheSeparationHits = (float)world->satCacheSeparationHitCount;
+	world->profile.collideSatCacheFaceHits = (float)world->satCacheFaceHitCount;
+	world->profile.collideSatCacheEdgeHits = (float)world->satCacheEdgeHitCount;
+	world->profile.collideSatFullSearches = (float)world->satFullSearchCount;
+	world->profile.collideRecycleCandidates = (float)recycleCandidateCount;
+	world->profile.collideRecycleMissingCache = (float)recycleMissingCacheCount;
+	world->profile.collideRecycleFastMesh = (float)recycleFastMeshCount;
+	world->profile.collideRecycleTested = (float)recycleTestedCount;
+	world->profile.collideRecycleRejectedAngular = (float)recycleRejectedAngularCount;
+	world->profile.collideRecycleRejectedLinear = (float)recycleRejectedLinearCount;
+	world->profile.collideRecycleRejectedArc = (float)recycleRejectedArcCount;
 
 	b3ValidateSolverSets( world );
 	b3ValidateContacts( world );
@@ -2084,6 +2200,24 @@ float b3World_GetContactRecycleDistance( b3WorldId worldId )
 {
 	b3World* world = b3GetWorldFromId( worldId );
 	return world->contactRecycleDistance;
+}
+
+void b3World_SetContactBudgetPerBody( b3WorldId worldId, int contactBudgetPerBody )
+{
+	b3World* world = b3GetWorldFromId( worldId );
+	B3_ASSERT( world->locked == false );
+	if ( world->locked )
+	{
+		return;
+	}
+
+	world->contactBudgetPerBody = contactBudgetPerBody > 0 ? contactBudgetPerBody : 0;
+}
+
+int b3World_GetContactBudgetPerBody( b3WorldId worldId )
+{
+	b3World* world = b3GetWorldFromId( worldId );
+	return world->contactBudgetPerBody;
 }
 
 void b3World_SetMaximumLinearSpeed( b3WorldId worldId, float maximumLinearSpeed )
@@ -3482,6 +3616,18 @@ void b3World_RebuildStaticTree( b3WorldId worldId )
 
 	b3DynamicTree* staticTree = world->broadPhase.trees + b3_staticBody;
 	b3DynamicTree_Rebuild( staticTree, true );
+}
+
+int b3World_RebuildDynamicTree( b3WorldId worldId )
+{
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return 0;
+	}
+
+	b3DynamicTree* dynamicTree = world->broadPhase.trees + b3_dynamicBody;
+	return b3DynamicTree_Rebuild( dynamicTree, true );
 }
 
 void b3World_EnableSpeculative( b3WorldId worldId, bool flag )
