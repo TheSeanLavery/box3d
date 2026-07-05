@@ -1881,19 +1881,6 @@ void b3PrepareContacts_Convex( b3SolverBlock block, b3StepContext* context )
 					( (float*)&constraint->rollingImpulse.Y )[lane] = warmStartScale * manifold->rollingImpulse.y;
 					( (float*)&constraint->rollingImpulse.Z )[lane] = warmStartScale * manifold->rollingImpulse.z;
 				}
-				else
-				{
-					( (float*)&constraint->rollingMass.cxx )[lane] = 0.0f;
-					( (float*)&constraint->rollingMass.cxy )[lane] = 0.0f;
-					( (float*)&constraint->rollingMass.cxz )[lane] = 0.0f;
-					( (float*)&constraint->rollingMass.cyy )[lane] = 0.0f;
-					( (float*)&constraint->rollingMass.cyz )[lane] = 0.0f;
-					( (float*)&constraint->rollingMass.czz )[lane] = 0.0f;
-
-					( (float*)&constraint->rollingImpulse.X )[lane] = 0.0f;
-					( (float*)&constraint->rollingImpulse.Y )[lane] = 0.0f;
-					( (float*)&constraint->rollingImpulse.Z )[lane] = 0.0f;
-				}
 
 				// zero remaining points
 				for ( int pointIndex = pointCount; pointIndex < B3_MAX_MANIFOLD_POINTS; ++pointIndex )
@@ -1975,8 +1962,13 @@ void b3WarmStartContacts_Convex( b3SolverBlock block, b3StepContext* context )
 		}
 
 		// Rolling resistance
+		if ( b3AllZeroW( c->rollingResistance ) == false )
 		{
-			b3Vec3W impulse = c->rollingImpulse;
+			b3FloatW rollingMask = b3GreaterThanW( c->rollingResistance, b3ZeroW() );
+			b3Vec3W impulse;
+			impulse.X = b3BlendW( b3ZeroW(), c->rollingImpulse.X, rollingMask );
+			impulse.Y = b3BlendW( b3ZeroW(), c->rollingImpulse.Y, rollingMask );
+			impulse.Z = b3BlendW( b3ZeroW(), c->rollingImpulse.Z, rollingMask );
 			bA.w = b3MulSubMVW( bA.w, c->invIA, impulse );
 			bB.w = b3MulAddMVW( bB.w, c->invIB, impulse );
 		}
@@ -2305,6 +2297,7 @@ void b3StoreImpulses_Convex( b3SolverBlock block, b3StepContext* context, int wo
 			const float* tangent2Y = (float*)&c->tangent2.Y;
 			const float* tangent2Z = (float*)&c->tangent2.Z;
 			const float* twistImpulse = (float*)&c->twistImpulse;
+			const float* rollingResistance = (float*)&c->rollingResistance;
 			const float* rollingImpulseX = (float*)&c->rollingImpulse.X;
 			const float* rollingImpulseY = (float*)&c->rollingImpulse.Y;
 			const float* rollingImpulseZ = (float*)&c->rollingImpulse.Z;
@@ -2333,11 +2326,9 @@ void b3StoreImpulses_Convex( b3SolverBlock block, b3StepContext* context, int wo
 					f1 * tangent1Z[lane] + f2 * tangent2Z[lane],
 				};
 				m->twistImpulse = twistImpulse[lane];
-				m->rollingImpulse = (b3Vec3){
-					rollingImpulseX[lane],
-					rollingImpulseY[lane],
-					rollingImpulseZ[lane],
-				};
+				m->rollingImpulse = rollingResistance[lane] > 0.0f ? (b3Vec3){ rollingImpulseX[lane], rollingImpulseY[lane],
+																				 rollingImpulseZ[lane] }
+																  : b3Vec3_zero;
 
 				int pointCount = m->pointCount;
 				for ( int pointIndex = 0; pointIndex < pointCount; ++pointIndex )
