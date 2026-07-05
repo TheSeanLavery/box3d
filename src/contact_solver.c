@@ -159,8 +159,10 @@ void b3PrepareContacts_Mesh( b3SolverBlock block, b3StepContext* context )
 			contactConstraint->friction = contact->friction;
 			contactConstraint->restitution = contact->restitution;
 			contactConstraint->rollingResistance = contact->rollingResistance;
-			contactConstraint->rollingMass =
-				contact->rollingResistance > 0.0f ? b3InvertMatrix( b3AddMM( iA, iB ) ) : b3Mat3_zero;
+			if ( contact->rollingResistance > 0.0f )
+			{
+				contactConstraint->rollingMass = b3InvertMatrix( b3AddMM( iA, iB ) );
+			}
 
 			b3ManifoldConstraint* manifoldConstraints = manifoldBase + specs[localIndex].manifoldStart;
 			contactConstraint->constraints = manifoldConstraints;
@@ -249,6 +251,7 @@ void b3PrepareContacts_Mesh( b3SolverBlock block, b3StepContext* context )
 					constraint->twistImpulse = warmStartScale * manifold->twistImpulse;
 				}
 
+				if ( contact->rollingResistance > 0.0f )
 				{
 					constraint->rollingImpulse = b3MulSV( warmStartScale, manifold->rollingImpulse );
 				}
@@ -339,6 +342,7 @@ void b3WarmStartContacts_Mesh( b3SolverBlock block, b3StepContext* context )
 			}
 
 			// Rolling resistance
+			if ( contactConstraint->rollingResistance > 0.0f )
 			{
 				b3Vec3 impulse = constraint->rollingImpulse;
 				wA = b3Sub( wA, b3MulMV( iA, impulse ) );
@@ -745,7 +749,8 @@ void b3StoreImpulses_Mesh( b3SolverBlock block, b3StepContext* context, int work
 				manifold->twistImpulse = constraint->twistImpulse;
 				manifold->frictionImpulse = b3Blend2( constraint->frictionImpulse.x, constraint->tangent1,
 													  constraint->frictionImpulse.y, constraint->tangent2 );
-				manifold->rollingImpulse = constraint->rollingImpulse;
+				manifold->rollingImpulse =
+					contactConstraint->rollingResistance > 0.0f ? constraint->rollingImpulse : b3Vec3_zero;
 
 				int count = constraint->pointCount;
 				B3_ASSERT( count == manifold->pointCount );
