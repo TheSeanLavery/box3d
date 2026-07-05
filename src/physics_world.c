@@ -548,6 +548,47 @@ static inline void b3PrefetchContact( const b3Contact* contact )
 	b3Prefetch( p + 192 );
 }
 
+static inline bool b3BodyIsSlowForRestingContact( const b3Body* body )
+{
+	if ( body->type == b3_staticBody )
+	{
+		return true;
+	}
+
+	return body->sleepTime > 0.0f;
+}
+
+static inline void b3RefreshRecycledContactManifolds( b3Contact* contact, b3BodySim* bodySimA, b3BodySim* bodySimB,
+													  b3WorldTransform transformA, b3WorldTransform transformB )
+{
+	b3Quat dqA = b3MulQuat( transformA.q, b3Conjugate( contact->cachedRotationA ) );
+	b3Quat dqB = b3MulQuat( transformB.q, b3Conjugate( contact->cachedRotationB ) );
+	b3Matrix3 matrixA = b3MakeMatrixFromQuat( dqA );
+	b3Matrix3 matrixB = b3MakeMatrixFromQuat( dqB );
+
+	// Minimize round-off.
+	b3Vec3 dc = b3SubPos( bodySimB->center, bodySimA->center );
+
+	int manifoldCount = contact->manifoldCount;
+	for ( int manifoldIndex = 0; manifoldIndex < manifoldCount; ++manifoldIndex )
+	{
+		b3Manifold* manifold = contact->manifolds + manifoldIndex;
+		b3Vec3 normal = manifold->normal;
+
+		int pointCount = manifold->pointCount;
+		for ( int pointIndex = 0; pointIndex < pointCount; ++pointIndex )
+		{
+			// Keep anchors but update separation, same as sub-stepping. This eliminates jitter.
+			b3ManifoldPoint* mp = manifold->points + pointIndex;
+			b3Vec3 rA = b3MulMV( matrixA, mp->anchorA );
+			b3Vec3 rB = b3MulMV( matrixB, mp->anchorB );
+			b3Vec3 dp = b3Add( dc, b3Sub( rB, rA ) );
+			mp->separation = mp->baseSeparation + b3Dot( dp, normal );
+			mp->persisted = true;
+		}
+	}
+}
+
 static void b3CollideTask( int startIndex, int endIndex, int workerIndex, void* context )
 {
 	b3TracyCZoneNC( collide_task, "Collide Task", b3_colorDodgerBlue, true );
@@ -684,7 +725,28 @@ static void b3CollideTask( int startIndex, int endIndex, int workerIndex, void* 
 				// distance + 2 * length(modified_cross(|qr.v|, maxExtent)) < recycleTolerance.
 				// 2*|qr.v| == 2*|sin(theta/2)| ~= theta for small angles.
 				float distSquared = b3DistanceSquared( xf.p, xfc.p );
-				if ( angularDistance <= B3_CONTACT_RECYCLE_ANGULAR_DISTANCE )
+				bool isRestingHullContact = wasTouching && isMeshContact == false && isFast == false && contact->manifoldCount > 0 &&
+											shapeA->type == b3_hullShape && shapeB->type == b3_hullShape &&
+											b3BodyIsSlowForRestingContact( bodyA ) && b3BodyIsSlowForRestingContact( bodyB );
+
+				if ( isRestingHullContact && angularDistance > B3_CONTACT_RECYCLE_ANGULAR_DISTANCE &&
+					 distSquared < recycleTolerance * recycleTolerance )
+				{
+					b3RefreshRecycledContactManifolds( contact, bodySimA, bodySimB, transformA, transformB );
+
+					// Diagnostics
+					taskContext->recycledContactCount += 1;
+					int bucketIndex = b3MinInt( contact->manifoldCount, B3_CONTACT_MANIFOLD_COUNT_BUCKETS - 1 );
+					if ( bucketIndex > 0 )
+					{
+						taskContext->manifoldCounts[bucketIndex - 1] += 1;
+					}
+
+					// Contact is recycled. This also skips updating other aspects of the contact
+					// such as material parameters.
+					continue;
+				}
+				else if ( angularDistance <= B3_CONTACT_RECYCLE_ANGULAR_DISTANCE )
 				{
 					taskContext->recycleRejectedAngularCount += 1;
 				}
@@ -714,32 +776,8 @@ static void b3CollideTask( int startIndex, int endIndex, int workerIndex, void* 
 					}
 					else
 					{
-						b3Quat dqA = b3MulQuat( transformA.q, b3Conjugate( contact->cachedRotationA ) );
-						b3Quat dqB = b3MulQuat( transformB.q, b3Conjugate( contact->cachedRotationB ) );
-						b3Matrix3 matrixA = b3MakeMatrixFromQuat( dqA );
-						b3Matrix3 matrixB = b3MakeMatrixFromQuat( dqB );
-
-						// Minimize round-off
-						b3Vec3 dc = b3SubPos( bodySimB->center, bodySimA->center );
-
 						int manifoldCount = contact->manifoldCount;
-						for ( int manifoldIndex = 0; manifoldIndex < manifoldCount; ++manifoldIndex )
-						{
-							b3Manifold* manifold = contact->manifolds + manifoldIndex;
-							b3Vec3 normal = manifold->normal;
-
-							int pointCount = manifold->pointCount;
-							for ( int pointIndex = 0; pointIndex < pointCount; ++pointIndex )
-							{
-								// Keep anchors but update separation, same as sub-stepping. This eliminates jitter.
-								b3ManifoldPoint* mp = manifold->points + pointIndex;
-								b3Vec3 rA = b3MulMV( matrixA, mp->anchorA );
-								b3Vec3 rB = b3MulMV( matrixB, mp->anchorB );
-								b3Vec3 dp = b3Add( dc, b3Sub( rB, rA ) );
-								mp->separation = mp->baseSeparation + b3Dot( dp, normal );
-								mp->persisted = true;
-							}
-						}
+						b3RefreshRecycledContactManifolds( contact, bodySimA, bodySimB, transformA, transformB );
 
 						// Diagnostics
 						taskContext->recycledContactCount += 1;
