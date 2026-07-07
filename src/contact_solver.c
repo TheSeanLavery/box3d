@@ -2379,11 +2379,8 @@ void b3StoreImpulses_Convex( b3SolverBlock block, b3StepContext* context, int wo
 
 void b3PrepareContacts_Overflow( b3StepContext* context )
 {
-	b3ConstraintGraph* graph = context->graph;
-	b3GraphColor* color = graph->colors + B3_OVERFLOW_INDEX;
-
-	uint16_t count = (uint16_t)color->contacts.count;
-	if (count == 0)
+	uint16_t count = (uint16_t)context->overflowSpans[0].count;
+	if ( count == 0 )
 	{
 		return;
 	}
@@ -2400,10 +2397,7 @@ void b3PrepareContacts_Overflow( b3StepContext* context )
 
 void b3WarmStartContacts_Overflow( b3StepContext* context )
 {
-	b3ConstraintGraph* graph = context->graph;
-	b3GraphColor* color = graph->colors + B3_OVERFLOW_INDEX;
-
-	uint16_t count = (uint16_t)color->contacts.count;
+	uint16_t count = (uint16_t)context->overflowSpans[0].count;
 	if ( count == 0 )
 	{
 		return;
@@ -2421,10 +2415,7 @@ void b3WarmStartContacts_Overflow( b3StepContext* context )
 
 void b3SolveContacts_Overflow( b3StepContext* context, bool useBias )
 {
-	b3ConstraintGraph* graph = context->graph;
-	b3GraphColor* color = graph->colors + B3_OVERFLOW_INDEX;
-
-	uint16_t count = (uint16_t)color->contacts.count;
+	uint16_t count = (uint16_t)context->overflowSpans[0].count;
 	if ( count == 0 )
 	{
 		return;
@@ -2442,10 +2433,7 @@ void b3SolveContacts_Overflow( b3StepContext* context, bool useBias )
 
 void b3ApplyRestitution_Overflow( b3StepContext* context )
 {
-	b3ConstraintGraph* graph = context->graph;
-	b3GraphColor* color = graph->colors + B3_OVERFLOW_INDEX;
-
-	uint16_t count = (uint16_t)color->contacts.count;
+	uint16_t count = (uint16_t)context->overflowSpans[0].count;
 	if ( count == 0 )
 	{
 		return;
@@ -2463,10 +2451,7 @@ void b3ApplyRestitution_Overflow( b3StepContext* context )
 
 void b3StoreImpulses_Overflow( b3StepContext* context )
 {
-	b3ConstraintGraph* graph = context->graph;
-	b3GraphColor* color = graph->colors + B3_OVERFLOW_INDEX;
-
-	uint16_t count = (uint16_t)color->contacts.count;
+	uint16_t count = (uint16_t)context->overflowSpans[0].count;
 	if ( count == 0 )
 	{
 		return;

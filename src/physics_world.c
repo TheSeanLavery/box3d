@@ -325,6 +325,10 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	world->contactHertz = def->contactHertz;
 	world->contactDampingRatio = def->contactDampingRatio;
 	world->contactRecycleDistance = B3_CONTACT_RECYCLE_DISTANCE;
+	world->activeFrontSolveSpeed = 0.05f;
+	world->activeFrontSolveDepth = 1;
+	world->enableActiveFrontSolve = false;
+	world->activeFrontOverflowOnly = false;
 
 	if ( def->frictionCallback == NULL )
 	{
@@ -2256,6 +2260,27 @@ int b3World_GetContactBudgetPerBody( b3WorldId worldId )
 {
 	b3World* world = b3GetWorldFromId( worldId );
 	return world->contactBudgetPerBody;
+}
+
+void b3World_SetActiveFrontSolve( b3WorldId worldId, bool flag, float speedThreshold, int graphDepth, bool overflowOnly )
+{
+	b3World* world = b3GetWorldFromId( worldId );
+	B3_ASSERT( world->locked == false );
+	if ( world->locked )
+	{
+		return;
+	}
+
+	world->enableActiveFrontSolve = flag;
+	world->activeFrontSolveSpeed = b3ClampFloat( speedThreshold, 0.0f, FLT_MAX );
+	world->activeFrontSolveDepth = b3ClampInt( graphDepth, 0, 16 );
+	world->activeFrontOverflowOnly = overflowOnly;
+}
+
+bool b3World_IsActiveFrontSolveEnabled( b3WorldId worldId )
+{
+	b3World* world = b3GetWorldFromId( worldId );
+	return world->enableActiveFrontSolve;
 }
 
 void b3World_SetMaximumLinearSpeed( b3WorldId worldId, float maximumLinearSpeed )

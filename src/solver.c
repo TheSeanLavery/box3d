@@ -1416,6 +1416,121 @@ static void b3BulletBodyTask( int startIndex, int endIndex, int workerIndex, voi
 	b3TracyCZoneEnd( bullet_body_task );
 }
 
+static int b3GetAwakeDynamicContactLocalIndex( b3Body* bodies, const b3Contact* contact, int edgeIndex )
+{
+	int bodyId = contact->edges[edgeIndex].bodyId;
+	b3Body* body = bodies + bodyId;
+	if ( body->type == b3_dynamicBody && body->setIndex == b3_awakeSet )
+	{
+		return body->localIndex;
+	}
+
+	return B3_NULL_INDEX;
+}
+
+static bool b3ContactTouchesActiveFront( b3Body* bodies, const b3Contact* contact, const int* activeFrontDepths )
+{
+	int localIndexA = b3GetAwakeDynamicContactLocalIndex( bodies, contact, 0 );
+	if ( localIndexA != B3_NULL_INDEX && activeFrontDepths[localIndexA] >= 0 )
+	{
+		return true;
+	}
+
+	int localIndexB = b3GetAwakeDynamicContactLocalIndex( bodies, contact, 1 );
+	return localIndexB != B3_NULL_INDEX && activeFrontDepths[localIndexB] >= 0;
+}
+
+static float b3BodyStateSpeedSquared( const b3BodyState* state )
+{
+	return b3Dot( state->linearVelocity, state->linearVelocity ) + 0.25f * b3Dot( state->angularVelocity, state->angularVelocity );
+}
+
+static bool b3GrowActiveFrontAcrossContact( b3Body* bodies, const b3Contact* contact, int* activeFrontDepths, int depth )
+{
+	int localIndexA = b3GetAwakeDynamicContactLocalIndex( bodies, contact, 0 );
+	int localIndexB = b3GetAwakeDynamicContactLocalIndex( bodies, contact, 1 );
+	bool changed = false;
+
+	if ( localIndexA != B3_NULL_INDEX && localIndexB != B3_NULL_INDEX )
+	{
+		if ( activeFrontDepths[localIndexA] >= 0 && activeFrontDepths[localIndexA] <= depth && activeFrontDepths[localIndexB] < 0 )
+		{
+			activeFrontDepths[localIndexB] = depth + 1;
+			changed = true;
+		}
+
+		if ( activeFrontDepths[localIndexB] >= 0 && activeFrontDepths[localIndexB] <= depth && activeFrontDepths[localIndexA] < 0 )
+		{
+			activeFrontDepths[localIndexA] = depth + 1;
+			changed = true;
+		}
+	}
+
+	return changed;
+}
+
+static int b3BuildActiveFront( b3World* world, b3SolverSet* awakeSet, int awakeBodyCount, int* activeFrontDepths )
+{
+	float speed = world->activeFrontSolveSpeed;
+	float speedSquared = speed * speed;
+	int rootCount = 0;
+
+	for ( int i = 0; i < awakeBodyCount; ++i )
+	{
+		b3BodyState* state = awakeSet->bodyStates.data + i;
+		float bodySpeedSquared = b3BodyStateSpeedSquared( state );
+		if ( bodySpeedSquared > speedSquared )
+		{
+			activeFrontDepths[i] = 0;
+			rootCount += 1;
+		}
+	}
+
+	if ( rootCount == 0 )
+	{
+		return 0;
+	}
+
+	b3Body* bodies = world->bodies.data;
+	b3GraphColor* colors = world->constraintGraph.colors;
+	int graphDepth = world->activeFrontSolveDepth;
+	for ( int depth = 0; depth < graphDepth; ++depth )
+	{
+		bool changed = false;
+		for ( int colorIndex = 0; colorIndex < B3_GRAPH_COLOR_COUNT; ++colorIndex )
+		{
+			b3GraphColor* color = colors + colorIndex;
+
+			for ( int i = 0; i < color->convexContacts.count; ++i )
+			{
+				int contactId = color->convexContacts.data[i];
+				b3Contact* contact = b3Array_Get( world->contacts, contactId );
+				changed = b3GrowActiveFrontAcrossContact( bodies, contact, activeFrontDepths, depth ) || changed;
+			}
+
+			for ( int i = 0; i < color->contacts.count; ++i )
+			{
+				int contactId = color->contacts.data[i].contactId;
+				b3Contact* contact = b3Array_Get( world->contacts, contactId );
+				changed = b3GrowActiveFrontAcrossContact( bodies, contact, activeFrontDepths, depth ) || changed;
+			}
+		}
+
+		if ( changed == false )
+		{
+			break;
+		}
+	}
+
+	int frontCount = 0;
+	for ( int i = 0; i < awakeBodyCount; ++i )
+	{
+		frontCount += activeFrontDepths[i] >= 0 ? 1 : 0;
+	}
+
+	return frontCount;
+}
+
 #if B3_SIMD_WIDTH == 4
 #define B3_SIMD_SHIFT 2
 #else
@@ -1485,7 +1600,11 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		int colorJointCounts[B3_GRAPH_COLOR_COUNT];
 		int* budgetedConvexContacts[B3_GRAPH_COLOR_COUNT] = { 0 };
 		int budgetedConvexContactCounts[B3_GRAPH_COLOR_COUNT] = { 0 };
+		b3ContactSpec* activeFrontContacts[B3_GRAPH_COLOR_COUNT] = { 0 };
+		int activeFrontContactCounts[B3_GRAPH_COLOR_COUNT] = { 0 };
+		b3ContactSpec* activeFrontOverflowContacts = NULL;
 		int* contactBudgetCounts = NULL;
+		int* activeFrontBodyDepths = NULL;
 		b3BlockDim graphWideContactDims[B3_GRAPH_COLOR_COUNT];
 		b3BlockDim graphContactDims[B3_GRAPH_COLOR_COUNT];
 		b3BlockDim graphJointDims[B3_GRAPH_COLOR_COUNT];
@@ -1496,6 +1615,17 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		{
 			contactBudgetCounts = B3_ALLOC( int, awakeBodyCount );
 			memset( contactBudgetCounts, 0, awakeBodyCount * sizeof( int ) );
+		}
+
+		if ( world->enableActiveFrontSolve && awakeBodyCount > 0 )
+		{
+			activeFrontBodyDepths = B3_ALLOC( int, awakeBodyCount );
+			memset( activeFrontBodyDepths, 0xFF, awakeBodyCount * sizeof( int ) );
+			if ( b3BuildActiveFront( world, awakeSet, awakeBodyCount, activeFrontBodyDepths ) == 0 )
+			{
+				B3_FREE( activeFrontBodyDepths, int, awakeBodyCount );
+				activeFrontBodyDepths = NULL;
+			}
 		}
 
 		// c is the active color index
@@ -1511,7 +1641,8 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 			int colorContactCount = color->contacts.count;
 			int colorJointCount = color->jointSims.count;
 
-			if ( contactBudgetCounts != NULL && colorConvexContactCount > 0 )
+			bool filterColoredContacts = activeFrontBodyDepths != NULL && world->activeFrontOverflowOnly == false;
+			if ( ( contactBudgetCounts != NULL || filterColoredContacts ) && colorConvexContactCount > 0 )
 			{
 				int* filteredContacts = B3_ALLOC( int, colorConvexContactCount );
 				int filteredCount = 0;
@@ -1519,6 +1650,11 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 				{
 					int contactId = color->convexContacts.data[contactIndex];
 					b3Contact* contact = b3Array_Get( world->contacts, contactId );
+					if ( filterColoredContacts && b3ContactTouchesActiveFront( world->bodies.data, contact, activeFrontBodyDepths ) == false )
+					{
+						continue;
+					}
+
 					int bodyIdA = contact->edges[0].bodyId;
 					int bodyIdB = contact->edges[1].bodyId;
 					b3Body* bodyA = b3Array_Get( world->bodies, bodyIdA );
@@ -1528,16 +1664,16 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 					int localIndexB =
 						bodyB->type == b3_dynamicBody && bodyB->setIndex == b3_awakeSet ? bodyB->localIndex : B3_NULL_INDEX;
 
-					bool keepA = localIndexA == B3_NULL_INDEX || contactBudgetCounts[localIndexA] < contactBudgetPerBody;
-					bool keepB = localIndexB == B3_NULL_INDEX || contactBudgetCounts[localIndexB] < contactBudgetPerBody;
+					bool keepA = contactBudgetCounts == NULL || localIndexA == B3_NULL_INDEX || contactBudgetCounts[localIndexA] < contactBudgetPerBody;
+					bool keepB = contactBudgetCounts == NULL || localIndexB == B3_NULL_INDEX || contactBudgetCounts[localIndexB] < contactBudgetPerBody;
 					if ( keepA && keepB )
 					{
 						filteredContacts[filteredCount++] = contactId;
-						if ( localIndexA != B3_NULL_INDEX )
+						if ( contactBudgetCounts != NULL && localIndexA != B3_NULL_INDEX )
 						{
 							contactBudgetCounts[localIndexA] += 1;
 						}
-						if ( localIndexB != B3_NULL_INDEX )
+						if ( contactBudgetCounts != NULL && localIndexB != B3_NULL_INDEX )
 						{
 							contactBudgetCounts[localIndexB] += 1;
 						}
@@ -1547,6 +1683,25 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 				budgetedConvexContacts[i] = filteredContacts;
 				budgetedConvexContactCounts[i] = filteredCount;
 				colorConvexContactCount = filteredCount;
+			}
+
+			if ( filterColoredContacts && colorContactCount > 0 )
+			{
+				b3ContactSpec* filteredContacts = B3_ALLOC( b3ContactSpec, colorContactCount );
+				int filteredCount = 0;
+				for ( int contactIndex = 0; contactIndex < colorContactCount; ++contactIndex )
+				{
+					b3ContactSpec spec = color->contacts.data[contactIndex];
+					b3Contact* contact = b3Array_Get( world->contacts, spec.contactId );
+					if ( b3ContactTouchesActiveFront( world->bodies.data, contact, activeFrontBodyDepths ) )
+					{
+						filteredContacts[filteredCount++] = spec;
+					}
+				}
+
+				activeFrontContacts[i] = filteredContacts;
+				activeFrontContactCounts[i] = filteredCount;
+				colorContactCount = filteredCount;
 			}
 
 			if ( colorConvexContactCount + colorContactCount + colorJointCount == 0 )
@@ -1568,8 +1723,9 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 			// Compute manifold starts and accumulate manifold count
 			for ( int j = 0; j < colorContactCount; ++j )
 			{
-				color->contacts.data[j].manifoldStart = manifoldCount;
-				manifoldCount += color->contacts.data[j].manifoldCount;
+				b3ContactSpec* contactSpecs = activeFrontContacts[i] != NULL ? activeFrontContacts[i] : color->contacts.data;
+				contactSpecs[j].manifoldStart = manifoldCount;
+				manifoldCount += contactSpecs[j].manifoldCount;
 			}
 
 			colorJointCounts[c] = colorJointCount;
@@ -1601,12 +1757,31 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 			&world->stack, manifoldCount * sizeof( b3ManifoldConstraint ), "manifold constraints" );
 
 		b3GraphColor* overflow = colors + B3_OVERFLOW_INDEX;
+		b3ContactSpec* overflowContacts = overflow->contacts.data;
 		int overflowCount = overflow->contacts.count;
+		if ( activeFrontBodyDepths != NULL && overflowCount > 0 )
+		{
+			activeFrontOverflowContacts = B3_ALLOC( b3ContactSpec, overflowCount );
+			int filteredCount = 0;
+			for ( int i = 0; i < overflowCount; ++i )
+			{
+				b3ContactSpec spec = overflow->contacts.data[i];
+				b3Contact* contact = b3Array_Get( world->contacts, spec.contactId );
+				if ( b3ContactTouchesActiveFront( world->bodies.data, contact, activeFrontBodyDepths ) )
+				{
+					activeFrontOverflowContacts[filteredCount++] = spec;
+				}
+			}
+
+			overflowContacts = activeFrontOverflowContacts;
+			overflowCount = filteredCount;
+		}
+
 		int overflowManifoldCount = 0;
 		for ( int i = 0; i < overflowCount; ++i )
 		{
-			overflow->contacts.data[i].manifoldStart = overflowManifoldCount;
-			overflowManifoldCount += overflow->contacts.data[i].manifoldCount;
+			overflowContacts[i].manifoldStart = overflowManifoldCount;
+			overflowManifoldCount += overflowContacts[i].manifoldCount;
 		}
 
 		overflow->contactConstraints = (b3ContactConstraint*)b3StackAlloc(
@@ -1671,10 +1846,10 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 					wideBase += colorContactCountW;
 				}
 
-				int colorContactCount = color->contacts.count;
+				int colorContactCount = activeFrontContacts[j] != NULL ? activeFrontContactCounts[j] : color->contacts.count;
 				contactPrepareSpans[i].start = contactBase;
 				contactPrepareSpans[i].count = colorContactCount;
-				contactPrepareSpans[i].contacts = color->contacts.data;
+				contactPrepareSpans[i].contacts = activeFrontContacts[j] != NULL ? activeFrontContacts[j] : color->contacts.data;
 
 				if ( colorContactCount == 0 )
 				{
@@ -1714,9 +1889,9 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 		//// Special span for overflow to allow for function re-use
 		b3ContactPrepareSpan overflowSpans[2] = { 0 };
 		overflowSpans[0].start = 0;
-		overflowSpans[0].count = overflow->contacts.count;
-		overflowSpans[0].contacts = overflow->contacts.data;
-		overflowSpans[1].start = overflow->contacts.count;
+		overflowSpans[0].count = overflowCount;
+		overflowSpans[0].contacts = overflowContacts;
+		overflowSpans[1].start = overflowCount;
 		overflowSpans[1].count = 0;
 		overflowSpans[1].contacts = NULL;
 
@@ -1951,10 +2126,22 @@ void b3Solve( b3World* world, b3StepContext* stepContext )
 			{
 				B3_FREE( budgetedConvexContacts[i], int, colors[i].convexContacts.count );
 			}
+			if ( activeFrontContacts[i] != NULL )
+			{
+				B3_FREE( activeFrontContacts[i], b3ContactSpec, colors[i].contacts.count );
+			}
 		}
 		if ( contactBudgetCounts != NULL )
 		{
 			B3_FREE( contactBudgetCounts, int, awakeBodyCount );
+		}
+		if ( activeFrontOverflowContacts != NULL )
+		{
+			B3_FREE( activeFrontOverflowContacts, b3ContactSpec, overflow->contacts.count );
+		}
+		if ( activeFrontBodyDepths != NULL )
+		{
+			B3_FREE( activeFrontBodyDepths, int, awakeBodyCount );
 		}
 
 		world->profile.transforms = b3GetMilliseconds( transformTicks );

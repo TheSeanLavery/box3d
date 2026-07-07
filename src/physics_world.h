@@ -242,7 +242,11 @@ typedef struct b3World
 	float contactHertz;
 	float contactDampingRatio;
 	float contactRecycleDistance;
+	float activeFrontSolveSpeed;
 	int contactBudgetPerBody;
+	int activeFrontSolveDepth;
+	bool enableActiveFrontSolve;
+	bool activeFrontOverflowOnly;
 
 	b3FrictionCallback* frictionCallback;
 	b3RestitutionCallback* restitutionCallback;

@@ -196,6 +196,14 @@ B3_API void b3World_SetContactBudgetPerBody( b3WorldId worldId, int contactBudge
 /// Get the experimental per-dynamic-body convex contact budget.
 B3_API int b3World_GetContactBudgetPerBody( b3WorldId worldId );
 
+/// Enable an experimental active-front solver filter. When enabled, only contacts within graphDepth contact hops of a moving
+/// body are prepared and solved. Zero graphDepth means only contacts directly touching moving bodies. Set overflowOnly to
+/// leave the colored solver graph untouched and filter just overflow contacts.
+B3_API void b3World_SetActiveFrontSolve( b3WorldId worldId, bool flag, float speedThreshold, int graphDepth, bool overflowOnly );
+
+/// Is the experimental active-front solver filter enabled?
+B3_API bool b3World_IsActiveFrontSolveEnabled( b3WorldId worldId );
+
 /// Set the maximum linear speed. Usually in m/s.
 B3_API void b3World_SetMaximumLinearSpeed( b3WorldId worldId, float maximumLinearSpeed );
 
